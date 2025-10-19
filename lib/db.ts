@@ -1,0 +1,37 @@
+import DatabaseConstructor from "better-sqlite3";
+import type { Database as BetterSqlite3Database } from "better-sqlite3";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { logger } from "./logger";
+
+const DEFAULT_DB_PATH = process.env.SQLITE_DB_PATH ?? join(process.cwd(), "db", "data.sqlite3");
+
+function ensureDirectory(path: string) {
+  const dir = dirname(path);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+}
+
+function applySchema(db: BetterSqlite3Database) {
+  const schemaPath = join(process.cwd(), "db", "schema.sql");
+  if (!existsSync(schemaPath)) {
+    logger.warn({ schemaPath }, "SQLite schema file missing; skipping migration");
+    return;
+  }
+  const schema = readFileSync(schemaPath, "utf8");
+  db.exec(schema);
+}
+
+function createConnection() {
+  ensureDirectory(DEFAULT_DB_PATH);
+  const connection = new DatabaseConstructor(DEFAULT_DB_PATH);
+  connection.pragma("journal_mode = WAL");
+  connection.pragma("foreign_keys = ON");
+  applySchema(connection);
+  return connection;
+}
+
+export const db = createConnection();
+
+export type Db = BetterSqlite3Database;
