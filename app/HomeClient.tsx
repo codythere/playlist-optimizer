@@ -198,6 +198,10 @@ export default function HomeClient() {
   const onUndo = () => console.log("動作回復");
   // ── 返回 UI 稿件 1
   const backToSelect = () => setView("select-playlists");
+  // 清空 UI 稿件 2 所有已勾選的影片
+  const clearAllSelections = () => {
+    setSelectedMap({}); // 你的欄位讀 selectedMap[pid] ?? new Set()，所以清空成 {} 就會全部未選
+  };
 
   // ---------------- Render ----------------
   return (
@@ -279,7 +283,12 @@ export default function HomeClient() {
 
           {/* 下：水平可捲動的清單欄位 */}
           <section className="space-y-3">
-            <div className="text-xl font-semibold">播放清單</div>
+            <div className="flex justify-between">
+              <div className="text-xl font-semibold">播放清單</div>
+              <Button variant="ghost" onClick={clearAllSelections}>
+                取消勾選
+              </Button>
+            </div>
 
             <div className="relative">
               <div className="overflow-x-auto pb-2">
