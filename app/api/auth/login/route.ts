@@ -1,24 +1,28 @@
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { buildAuthUrl, isGoogleConfigured } from "@/lib/google";
-import { jsonOk, jsonError } from "@/lib/result";
+import { jsonError } from "@/lib/result";
 
 const STATE_COOKIE = "ytpm_oauth_state";
 
 export async function GET() {
   if (!isGoogleConfigured()) {
-    return jsonOk({ loginUrl: null, usingMock: true });
+    return jsonError("not_configured", "Google OAuth is not configured", {
+      status: 500,
+    });
   }
 
   const state = nanoid(18);
   const authUrl = buildAuthUrl(state);
   if (!authUrl) {
-    return jsonError("oauth_not_configured", "Google OAuth is not configured", {
+    return jsonError("not_configured", "Google OAuth is not configured", {
       status: 500,
     });
   }
 
-  const response = NextResponse.redirect(authUrl);
+  const response = NextResponse.redirect(authUrl, {
+    status: 302,
+  });
   response.cookies.set({
     name: STATE_COOKIE,
     value: state,

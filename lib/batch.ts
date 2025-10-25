@@ -17,12 +17,36 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_CONCURRENCY = 35;
 const DEFAULT_RETRY_CODES = [403, 429, "EAI_AGAIN", "ETIMEDOUT"]; // Retry on quota and rate errors
 
-function shouldRetry(error: any, retryCodes: Array<number | string>) {
-  if (!error) return false;
-  const code = error.status ?? error.code ?? error?.response?.status ?? error?.errno;
-  if (typeof code === "number" || typeof code === "string") {
-    return retryCodes.includes(code);
+function extractCode(value: unknown): number | string | undefined {
+  if (typeof value === "number" || typeof value === "string") {
+    return value;
   }
+  return undefined;
+}
+
+function shouldRetry(error: unknown, retryCodes: Array<number | string>) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const record = error as Record<string, unknown>;
+  const direct =
+    extractCode(record.status) ??
+    extractCode(record.code) ??
+    extractCode(record.errno);
+  if (direct !== undefined) {
+    return retryCodes.includes(direct);
+  }
+
+  const response = record.response;
+  if (response && typeof response === "object") {
+    const responseRecord = response as Record<string, unknown>;
+    const nested = extractCode(responseRecord.status);
+    if (nested !== undefined) {
+      return retryCodes.includes(nested);
+    }
+  }
+
   return false;
 }
 

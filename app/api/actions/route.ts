@@ -1,9 +1,7 @@
 import type { NextRequest } from "next/server";
-import { getSession } from "@/lib/auth";
+import { requireUserId } from "@/lib/auth";
 import { listActions, getActionCounts } from "@/lib/actions-store";
-import { jsonOk } from "@/lib/result";
-
-const DEFAULT_USER_ID = "default-user";
+import { jsonOk, jsonError } from "@/lib/result";
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
@@ -11,10 +9,12 @@ export async function GET(request: NextRequest) {
   const cursor = url.searchParams.get("cursor");
   const limit = Math.min(Math.max(limitParam, 1), 100);
 
-  const session = getSession();
-  const userId = session?.userId ?? DEFAULT_USER_ID;
+  const auth = requireUserId();
+  if (!auth) {
+    return jsonError("unauthorized", "Sign in to continue", { status: 401 });
+  }
 
-  const actions = listActions(userId, limit + 1, cursor ?? undefined);
+  const actions = listActions(auth.userId, limit + 1, cursor ?? undefined);
   const hasMore = actions.length > limit;
   const page = hasMore ? actions.slice(0, limit) : actions;
 

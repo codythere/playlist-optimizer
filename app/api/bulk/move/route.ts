@@ -1,29 +1,30 @@
 import type { NextRequest } from "next/server";
-import { getSession } from "@/lib/auth";
 import { jsonError, jsonOk } from "@/lib/result";
 import { bulkMoveSchema } from "@/validators/bulk";
 import { performBulkMove, getActionSummary } from "@/lib/actions-service";
 import { checkIdempotencyKey, registerIdempotencyKey } from "@/lib/idempotency";
-
-const DEFAULT_USER_ID = "default-user";
+import { requireUserId } from "@/lib/auth";
 
 export async function POST(request: NextRequest) {
   let body: unknown;
   try {
     body = await request.json();
-  } catch (error) {
-    return jsonError("invalid_json", "Invalid JSON body", { status: 400 });
+  } catch {
+    return jsonError("invalid_request", "Invalid JSON body", { status: 400 });
   }
 
   const parseResult = bulkMoveSchema.safeParse(body);
   if (!parseResult.success) {
-    return jsonError("validation_error", parseResult.error.message, { status: 400 });
+    return jsonError("invalid_request", parseResult.error.message, { status: 400 });
   }
 
   const payload = parseResult.data;
-  const session = getSession();
-  const userId = session?.userId ?? DEFAULT_USER_ID;
+  const auth = requireUserId();
+  if (!auth) {
+    return jsonError("unauthorized", "Sign in to continue", { status: 401 });
+  }
 
+  const userId = auth.userId;
   const idempotencyKey =
     request.headers.get("idempotency-key") ?? payload.idempotencyKey ?? undefined;
 

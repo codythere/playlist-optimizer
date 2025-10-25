@@ -1,23 +1,25 @@
+import type { youtube_v3 } from "googleapis";
 import { getYouTubeClient } from "./google";
 import { logger } from "./logger";
+import { parseYouTubeError, GoogleApiError } from "./errors";
 import type { PlaylistItemSummary, PlaylistSummary } from "@/types/youtube";
 
 const SAMPLE_PLAYLISTS: PlaylistSummary[] = [
   {
     id: "PL_mock_1",
-    title: "?垢??嗉?",
+    title: "?????????????",
     itemCount: 12,
     thumbnailUrl: "https://images.unsplash.com/photo-1523475472560-d2df97ec485c?w=320&auto=format&fit=crop&q=80",
   },
   {
     id: "PL_mock_2",
-    title: "?單?敺?皜",
+    title: "??????????????",
     itemCount: 8,
     thumbnailUrl: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=320&auto=format&fit=crop&q=80",
   },
   {
     id: "PL_mock_3",
-    title: "?降閮?",
+    title: "??????????",
     itemCount: 5,
     thumbnailUrl: "https://images.unsplash.com/photo-1526378722484-cc5c7100cde1?w=320&auto=format&fit=crop&q=80",
   },
@@ -27,7 +29,7 @@ const SAMPLE_PLAYLIST_ITEMS: Record<string, PlaylistItemSummary[]> = {
   PL_mock_1: new Array(5).fill(0).map((_, index) => ({
     playlistItemId: `PLI_mock_1_${index}`,
     videoId: `video_mock_${index}`,
-    title: `?垢?飛 ${index + 1}`,
+    title: `?????????? ${index + 1}`,
     channelTitle: "YT DEV Channel",
     thumbnailUrl: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=320&auto=format&fit=crop&q=80",
     position: index,
@@ -35,7 +37,7 @@ const SAMPLE_PLAYLIST_ITEMS: Record<string, PlaylistItemSummary[]> = {
   PL_mock_2: new Array(4).fill(0).map((_, index) => ({
     playlistItemId: `PLI_mock_2_${index}`,
     videoId: `music_mock_${index}`,
-    title: `Lo-fi ?脩 ${index + 1}`,
+    title: `Lo-fi ????? ${index + 1}`,
     channelTitle: "Lofi Girl",
     thumbnailUrl: "https://images.unsplash.com/photo-1485579149621-3123dd979885?w=320&auto=format&fit=crop&q=80",
     position: index,
@@ -85,8 +87,9 @@ export async function fetchPlaylists(userId: string) {
       }
       nextPageToken = response.data.nextPageToken ?? undefined;
     } catch (error) {
-      logger.error({ err: error }, "Failed to fetch playlists from YouTube API");
-      break;
+      const parsed = parseYouTubeError(error);
+      logger.error({ err: error, errorCode: parsed.code }, "Failed to fetch playlists from YouTube API");
+      throw new GoogleApiError(parsed.code, parsed.message);
     }
   } while (nextPageToken);
 
@@ -97,52 +100,79 @@ export async function fetchPlaylists(userId: string) {
   };
 }
 
-export async function fetchPlaylistItems(playlistId: string, userId: string) {
+export interface PlaylistItemEntry {
+  id: string;
+  videoId: string;
+  title: string;
+  position: number | null;
+  channelTitle: string;
+  thumbnails: youtube_v3.Schema$ThumbnailDetails | null;
+  publishedAt: string | null;
+}
+
+export async function fetchPlaylistItems(userId: string, playlistId: string, pageToken?: string) {
   const client = await getYouTubeClient(userId);
   if (!client) {
+    const items = (SAMPLE_PLAYLIST_ITEMS[playlistId] ?? []).map((item) => ({
+      id: item.playlistItemId,
+      videoId: item.videoId,
+      title: item.title,
+      position: item.position ?? null,
+      channelTitle: item.channelTitle,
+      thumbnails: item.thumbnailUrl
+        ? ({ default: { url: item.thumbnailUrl } } as youtube_v3.Schema$ThumbnailDetails)
+        : null,
+      publishedAt: null,
+    }));
     return {
-      items: SAMPLE_PLAYLIST_ITEMS[playlistId] ?? [],
-      estimatedQuota: 0,
+      items,
+      nextPageToken: undefined,
       usingMock: true,
     };
   }
 
-  const items: PlaylistItemSummary[] = [];
-  let nextPageToken: string | undefined;
-  let quota = 0;
-
-  do {
-    try {
-      const response = await client.playlistItems.list({
-        part: ["id", "snippet", "contentDetails"],
-        playlistId,
-        maxResults: 50,
-        pageToken: nextPageToken,
-      });
-      quota += 1;
-      const entries = response.data.items ?? [];
-      for (const entry of entries) {
+  try {
+    const response = await client.playlistItems.list({
+      part: ["id", "snippet", "contentDetails"],
+      playlistId,
+      maxResults: 50,
+      pageToken,
+    });
+    const entries = response.data.items ?? [];
+    const items = entries
+      .map((entry) => {
         const snippet = entry.snippet;
-        if (!entry.id || !snippet) continue;
-        items.push({
-          playlistItemId: entry.id,
+        if (!entry.id || !snippet) {
+          return null;
+        }
+        return {
+          id: entry.id,
           videoId: snippet.resourceId?.videoId ?? "",
           title: snippet.title ?? "Untitled",
+          position: typeof snippet.position === "number" ? snippet.position : null,
           channelTitle: snippet.videoOwnerChannelTitle ?? snippet.channelTitle ?? "",
-          thumbnailUrl: snippet.thumbnails?.medium?.url ?? snippet.thumbnails?.default?.url ?? null,
-          position: snippet.position ?? null,
-        });
-      }
-      nextPageToken = response.data.nextPageToken ?? undefined;
-    } catch (error) {
-      logger.error({ err: error }, "Failed to fetch playlist items from YouTube API");
-      break;
-    }
-  } while (nextPageToken);
+          thumbnails: snippet.thumbnails ?? null,
+          publishedAt: snippet.publishedAt ?? null,
+        };
+      })
+      .filter((item): item is PlaylistItemEntry => Boolean(item));
 
-  return {
-    items,
-    estimatedQuota: quota,
-    usingMock: false,
-  };
+    return {
+      items,
+      nextPageToken: response.data.nextPageToken ?? undefined,
+      usingMock: false,
+    };
+  } catch (error) {
+    const parsed = parseYouTubeError(error);
+    logger.error({ err: error, errorCode: parsed.code, playlistId }, "Failed to fetch playlist items from YouTube API");
+    throw new GoogleApiError(parsed.code, parsed.message);
+  }
 }
+
+
+
+
+
+
+
+

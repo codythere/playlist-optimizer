@@ -1,91 +1,58 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+// lib/auth.ts
 import { cookies } from "next/headers";
-import { logger } from "./logger";
 
-export const SESSION_COOKIE_NAME = "ytpm_session";
+const SESSION_COOKIE = "ytpm_session";
 
-export interface Session {
-  userId: string;
-}
+export type Session = { userId: string };
 
-type CookieStore = {
-  get(name: string): { value: string } | undefined;
-};
-
-const FALLBACK_SECRET = "dev_only_change_me";
-let hasWarnedAboutSecret = false;
-
-function getSecret() {
-  const secret = process.env.SESSION_SECRET ?? FALLBACK_SECRET;
-  if (!process.env.SESSION_SECRET && !hasWarnedAboutSecret) {
-    logger.warn("SESSION_SECRET not set; using fallback secret intended for development only");
-    hasWarnedAboutSecret = true;
-  }
-  return secret;
-}
-
-function sign(payload: string) {
-  const hmac = createHmac("sha256", getSecret());
-  hmac.update(payload);
-  return hmac.digest("base64url");
-}
-
-export function encodeSession(session: Session) {
-  const payload = Buffer.from(JSON.stringify(session)).toString("base64url");
-  const signature = sign(payload);
-  return `${payload}.${signature}`;
-}
-
-export function decodeSession(value: string | undefined): Session | null {
-  if (!value) return null;
-  const [payload, signature] = value.split(".");
-  if (!payload || !signature) {
-    return null;
-  }
-  const expected = sign(payload);
+// 讀 cookie
+export async function getSessionFromCookies(): Promise<Session | null> {
+  const store = await cookies();
+  const raw = store.get(SESSION_COOKIE)?.value;
+  if (!raw) return null;
   try {
-    if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
-      return null;
-    }
-  } catch (error) {
-    return null;
-  }
-  try {
-    const json = Buffer.from(payload, "base64url").toString("utf8");
-    return JSON.parse(json) as Session;
-  } catch (error) {
+    const parsed = JSON.parse(raw) as Session;
+    return parsed?.userId ? parsed : null;
+  } catch {
     return null;
   }
 }
 
-export function getSessionFromCookies(store: CookieStore) {
-  return decodeSession(store.get(SESSION_COOKIE_NAME)?.value);
+export async function getSession(): Promise<Session | null> {
+  return getSessionFromCookies();
 }
 
-export function getSession() {
-  return getSessionFromCookies(cookies());
-}
-
-export function buildSessionCookie(session: Session) {
-  return {
-    name: SESSION_COOKIE_NAME,
-    value: encodeSession(session),
+// 設 cookie
+export async function setSessionCookie(
+  value: string,
+  opts?: { expires?: Date }
+) {
+  const store = await cookies();
+  store.set(SESSION_COOKIE, value, {
     httpOnly: true,
-    sameSite: "lax" as const,
-    path: "/",
+    sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
-    maxAge: 60 * 60 * 24 * 30,
-  };
+    path: "/",
+    ...opts,
+  });
 }
 
-export function buildEmptySessionCookie() {
-  return {
-    name: SESSION_COOKIE_NAME,
-    value: "",
-    httpOnly: true,
-    sameSite: "lax" as const,
-    path: "/",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 0,
-  };
+// 清 cookie  ← 你缺少的這個
+export async function clearSessionCookie() {
+  const store = await cookies();
+  store.delete(SESSION_COOKIE);
+}
+
+// 要求 userId（未登入回 null）
+export async function requireUserId(): Promise<string | null> {
+  const s = await getSession();
+  return s?.userId ?? null;
+}
+
+// 提供 /api/auth/me 用
+export async function resolveAuthContext() {
+  const s = await getSession();
+  return s?.userId
+    ? { loggedIn: true, userId: s.userId }
+    : { loggedIn: false, userId: null };
 }

@@ -9,6 +9,33 @@ import type {
   ActionType,
 } from "@/types/actions";
 
+interface ActionRow {
+  id: string;
+  user_id: string;
+  type: ActionType;
+  source_playlist_id: string | null;
+  target_playlist_id: string | null;
+  status: ActionStatus;
+  created_at: string;
+  finished_at: string | null;
+  parent_action_id: string | null;
+}
+
+interface ActionItemRow {
+  id: string;
+  action_id: string;
+  type: ActionType;
+  video_id: string | null;
+  source_playlist_id: string | null;
+  target_playlist_id: string | null;
+  source_playlist_item_id: string | null;
+  target_playlist_item_id: string | null;
+  position: number | null;
+  status: ActionItemStatus;
+  error_code: string | null;
+  error_message: string | null;
+}
+
 const insertActionStmt = db.prepare(
   `INSERT INTO actions (
     id,
@@ -80,7 +107,7 @@ const updateActionItemStmt = db.prepare(
    WHERE id = ?`
 );
 
-function mapAction(row: any): ActionRecord {
+function mapAction(row: ActionRow): ActionRecord {
   return {
     id: row.id,
     userId: row.user_id,
@@ -94,7 +121,7 @@ function mapAction(row: any): ActionRecord {
   };
 }
 
-function mapActionItem(row: any): ActionItemRecord {
+function mapActionItem(row: ActionItemRow): ActionItemRecord {
   return {
     id: row.id,
     actionId: row.action_id,
@@ -131,13 +158,19 @@ export function createAction(params: {
     status,
     params.parentActionId ?? null
   );
-  const row = selectActionByIdStmt.get(id);
+  const row = selectActionByIdStmt.get(id) as ActionRow | undefined;
+  if (!row) {
+    throw new Error("Failed to load action after insert");
+  }
   return mapAction(row);
 }
 
 export function setActionStatus(id: string, status: ActionStatus, finishedAt?: string | null) {
   updateActionStatusStmt.run(status, finishedAt ?? null, finishedAt ?? null, id);
-  const row = selectActionByIdStmt.get(id);
+  const row = selectActionByIdStmt.get(id) as ActionRow | undefined;
+  if (!row) {
+    throw new Error("Failed to load action after update");
+  }
   return mapAction(row);
 }
 
@@ -172,8 +205,10 @@ export function createActionItems(items: Array<{
       item.errorCode ?? null,
       item.errorMessage ?? null
     );
-    const row = selectActionItemByIdStmt.get(id);
-    created.push(mapActionItem(row));
+    const row = selectActionItemByIdStmt.get(id) as ActionItemRow | undefined;
+    if (row) {
+      created.push(mapActionItem(row));
+    }
   }
   return created;
 }
@@ -184,7 +219,7 @@ export function updateActionItem(id: string, updates: {
   errorMessage?: string | null;
   targetPlaylistItemId?: string | null;
 }) {
-  const existing = selectActionItemByIdStmt.get(id);
+  const existing = selectActionItemByIdStmt.get(id) as ActionItemRow | undefined;
   if (!existing) {
     return null;
   }
@@ -200,27 +235,27 @@ export function updateActionItem(id: string, updates: {
     mergedTarget,
     id
   );
-  const row = selectActionItemByIdStmt.get(id);
+  const row = selectActionItemByIdStmt.get(id) as ActionItemRow | undefined;
   return row ? mapActionItem(row) : null;
 }
 
 export function listActionItems(actionId: string) {
-  const rows = selectActionItemsStmt.all(actionId);
+  const rows = selectActionItemsStmt.all(actionId) as ActionItemRow[];
   return rows.map(mapActionItem);
 }
 
 export function getActionById(id: string) {
-  const row = selectActionByIdStmt.get(id);
+  const row = selectActionByIdStmt.get(id) as ActionRow | undefined;
   return row ? mapAction(row) : null;
 }
 
 export function listActions(userId: string, limit: number, cursor?: string | null) {
   let cursorTimestamp: string | null = null;
   if (cursor) {
-    const cursorAction = selectActionByIdStmt.get(cursor);
+    const cursorAction = selectActionByIdStmt.get(cursor) as ActionRow | undefined;
     cursorTimestamp = cursorAction?.created_at ?? null;
   }
-  const rows = selectActionsPageStmt.all(userId, cursorTimestamp, limit);
+  const rows = selectActionsPageStmt.all(userId, cursorTimestamp, limit) as ActionRow[];
   return rows.map(mapAction);
 }
 

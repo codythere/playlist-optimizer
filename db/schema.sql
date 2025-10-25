@@ -40,3 +40,12 @@ CREATE TABLE IF NOT EXISTS action_items (
 
 CREATE INDEX IF NOT EXISTS idx_actions_user_created_at ON actions(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_action_items_action ON action_items(action_id);
+
+CREATE TABLE IF NOT EXISTS oauth_credentials (
+  user_id TEXT PRIMARY KEY,
+  access_token TEXT,
+  refresh_token TEXT,
+  expiry_date INTEGER,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+

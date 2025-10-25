@@ -1,36 +1,101 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# yt-playlist-manager
 
-## Getting Started
+A Next.js (App Router) application for managing YouTube playlists in bulk. Sign in with Google, fetch your playlists, and perform batch add/move/remove operations with a single interface.
 
-First, run the development server:
+## Features
+
+- Google OAuth 2.0 login with secure, signed sessions
+- Automatic refresh-token storage in SQLite (Better SQLite3)
+- Live YouTube Data API v3 integration (playlists & playlist items)
+- Bulk add, move, and remove actions with idempotency + action history
+- React Query powered UI with optimistic refresh, toasts, and loading/error states
+- Mock mode fallback with seeded sample data when credentials are not configured
+
+## Prerequisites
+
+- Node.js 18.18 or newer (see `.nvmrc`)
+- pnpm (recommended) or npm/yarn/bun
+- A Google Cloud project with the YouTube Data API v3 and OAuth consent screen configured
+
+### Google OAuth setup
+
+1. In the Google Cloud Console create (or reuse) an OAuth 2.0 Client ID of type **Web application**.
+2. Add `http://localhost:3000/api/auth/callback` to the authorised redirect URIs.
+3. Enable the **YouTube Data API v3** for the same project.
+4. Copy the client ID and client secret for use in your environment variables.
+
+## Environment variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GOOGLE_CLIENT_ID` | Yes | OAuth client ID issued by Google. |
+| `GOOGLE_CLIENT_SECRET` | Yes | OAuth client secret. |
+| `GOOGLE_REDIRECT_URI` | Yes | Redirect URL (defaults to `http://localhost:3000/api/auth/callback`). |
+| `SESSION_SECRET` | Yes | Secret used to sign session cookies (use a long random string in production). |
+| `APP_BASE_URL` | Yes | Base URL used for redirects and links (e.g. `http://localhost:3000`). |
+| `SQLITE_DB_PATH` | No | Override the SQLite file path (defaults to `./db/data.sqlite3`). |
+| `LOG_LEVEL` | No | Pino logger level (`debug`, `info`, `warn`, `error`). |
+
+### Getting started
+
+1. Install dependencies:
+
+   ```bash
+   pnpm install
+   ```
+
+2. Create a `.env.local` from the template and fill in your credentials:
+
+   ```bash
+   cp .env.example .env.local
+   ```
+
+3. Start the development server:
+
+   ```bash
+   pnpm dev
+   ```
+
+4. Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+## Using the app
+
+1. **Sign in:** click *Sign in with Google*. In mock mode (missing env vars) the UI loads sample data.
+2. **Pick playlists:** the left column lists your playlists from `/api/playlists`. Selecting one loads its items.
+3. **Select videos:** check the videos you want to edit; the toolbar shows how many are selected.
+4. **Run a bulk action:**
+   - *Add videos:* paste video IDs, choose a target playlist, and press *Add videos*.
+   - *Remove selected:* removes the checked videos from the current playlist.
+   - *Move selected:* pick another playlist in the dropdown and press *Move selected*.
+5. **Review history:** open [/action-log](http://localhost:3000/action-log) to inspect past actions, retry failed items, or undo a batch.
+
+## Database
+
+Refresh tokens, idempotency keys, and action history are stored in SQLite (`db/data.sqlite3` by default). The schema is applied automatically. Delete the file if you want a clean local state (a new database will be created on next start).
+
+## Testing & linting
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm lint
+pnpm typecheck
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Production checklist
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Provide production values for the environment variables above.
+- Publish the OAuth consent screen and monitor YouTube Data API quota.
+- Rotate `SESSION_SECRET` and refresh tokens as needed.
+- Consider exporting/importing your SQLite database for backups.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Troubleshooting
 
-## Learn More
+| Issue | Hint |
+| --- | --- |
+| Missing environment variables | Mock mode will activate; fill `.env.local` with valid Google credentials for live data. |
+| Login redirects to an error | Make sure the redirect URI matches `GOOGLE_REDIRECT_URI` exactly. |
+| OAuth callback missing refresh token | Revoke the app in [Google Account settings](https://myaccount.google.com/permissions) and sign in again to force a fresh consent screen. |
+| API calls return `quotaExceeded` | Bulk operations consume ~50 quota units per insert/delete. Check usage in Google Cloud Console. |
 
-To learn more about Next.js, take a look at the following resources:
+## License
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+This project is provided as-is for internal tooling demos. Adapt before using in production.
