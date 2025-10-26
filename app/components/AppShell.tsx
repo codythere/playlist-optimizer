@@ -4,7 +4,13 @@ import * as React from "react";
 import Link from "next/link";
 import { Menu, History, ListMusic } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Sheet, SheetContent } from "@/app/components/ui/sheet";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/app/components/ui/sheet";
+import { VisuallyHidden } from "@radix-ui/react-visually-hidden";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   // 手機：覆蓋式側欄
@@ -39,27 +45,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      {/* Sidebar（桌機，內嵌可收合） */}
+      {/* Sidebar（桌機固定版） */}
       <aside
         className={cn(
-          "hidden md:flex md:flex-col border-r bg-background overflow-hidden transition-[width] duration-200",
+          "hidden md:flex md:flex-col fixed left-0 top-0 h-screen border-r bg-background overflow-hidden transition-[width] duration-200",
           desktopOpen ? "w-56" : "w-0"
         )}
         aria-hidden={!desktopOpen}
       >
-        {/* 展開時才渲染內容，避免 tab 停留在收合區塊 */}
         {desktopOpen ? NavItems : null}
       </aside>
 
       {/* 手機側欄（Radix Sheet 覆蓋式） */}
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent side="left" className="w-64 p-0">
+          <SheetHeader>
+            <VisuallyHidden>
+              <SheetTitle>Navigation</SheetTitle>
+            </VisuallyHidden>
+          </SheetHeader>
           {NavItems}
         </SheetContent>
       </Sheet>
 
-      {/* Main */}
-      <div className="flex-1">
+      {/* Main：自動為固定側欄留出空間 */}
+      <div
+        className={cn(
+          "flex-1 transition-all duration-200",
+          desktopOpen ? "md:ml-56" : "md:ml-0"
+        )}
+      >
         <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur">
           <div className="flex h-14 items-center gap-2 px-4">
             {/* 手機：打開 Sheet */}
@@ -71,7 +86,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Menu className="h-5 w-5" />
             </button>
 
-            {/* 桌機：切換內嵌側欄寬度 */}
+            {/* 桌機：切換固定側欄寬度 */}
             <button
               aria-label="Toggle sidebar"
               aria-expanded={desktopOpen}
