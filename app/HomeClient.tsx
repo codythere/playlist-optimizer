@@ -139,7 +139,8 @@ function usePlaylists(enabled: boolean) {
     queryKey: ["playlists"],
     queryFn: () => apiRequest<PlaylistsPayload>("/api/playlists"),
     enabled,
-    staleTime: 15_000,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 }
 
@@ -303,7 +304,8 @@ export default function HomeClient() {
   const authQ = useQuery({
     queryKey: ["auth"],
     queryFn: fetchAuth,
-    staleTime: 30_000,
+    staleTime: 0, // 或維持極短
+    refetchOnMount: "always",
   });
   const auth = authQ.data;
 
@@ -373,7 +375,8 @@ export default function HomeClient() {
         return { playlist: p, items };
       },
       enabled: view === "manage-items",
-      staleTime: 10_000,
+      staleTime: 0, // ✅
+      refetchOnMount: "always", // ✅
     })),
   });
 
