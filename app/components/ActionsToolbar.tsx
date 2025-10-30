@@ -3,23 +3,34 @@
 import * as React from "react";
 import { Button } from "@/app/components/ui/button";
 import type { PlaylistSummary } from "@/types/youtube";
+import { Loader2 } from "lucide-react";
 
 export interface ActionsToolbarProps {
   selectedCount: number;
   playlists: PlaylistSummary[];
+
   /** 受控目標清單（可為 null） */
   selectedPlaylistId?: string | null;
   /** 受控模式：目標變更回呼（可選） */
   onTargetChange?: (id: string | null) => void;
 
-  onAdd: () => void;
+  /** ✅ 讓 onAdd 也吃 targetId（和 onMove 一致） */
+  onAdd: (targetId?: string | null) => void;
   onRemove: () => void;
   /** 可接受 targetId；若父層不傳，仍可維持舊介面呼叫 `onMove()` */
   onMove: (targetId?: string | null) => void;
   onUndo: () => void;
 
+  /** 相容舊版：全域鎖（若提供，會併入三顆按鈕的 disabled） */
   isLoading?: boolean;
+
+  /** 估算配額（顯示用） */
   estimatedQuota?: number;
+
+  /** ✅ 進階版：各自的 loading（優先於 isLoading） */
+  addLoading?: boolean;
+  removeLoading?: boolean;
+  moveLoading?: boolean;
 }
 
 export function ActionsToolbar(props: ActionsToolbarProps) {
@@ -34,9 +45,12 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
     onUndo,
     isLoading,
     estimatedQuota,
+    addLoading,
+    removeLoading,
+    moveLoading,
   } = props;
 
-  // 非受控：自己保留
+  // 非受控：自己保留目標值
   const [localTargetId, setLocalTargetId] = React.useState<string | null>(null);
 
   // 若父層有提供 selectedPlaylistId，則視為受控值；否則用自己的
@@ -47,20 +61,28 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
 
   const handleSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value || null;
-
-    if (onTargetChange) {
-      onTargetChange(v);
-    } else {
-      setLocalTargetId(v);
-    }
+    if (onTargetChange) onTargetChange(v);
+    else setLocalTargetId(v);
   };
 
-  const disabled = isLoading || selectedCount === 0;
+  // 全域忙碌（相容舊版）
+  const busyAll = Boolean(isLoading);
+
+  // ✅ 各鍵最終狀態（個別優先 → 退回全域）
+  const addBusy = Boolean(addLoading) || busyAll;
+  const removeBusy = Boolean(removeLoading) || busyAll;
+  const moveBusy = Boolean(moveLoading) || busyAll;
+
+  // 共用禁用條件
+  const nothingSelected = selectedCount === 0;
+
+  // 目標清單下拉：新增/移轉進行中時鎖住，避免操作中途改目標
+  const targetDisabled = addBusy || moveBusy;
 
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-3">
       <div className="text-sm">
-        已勾選：<b>{selectedCount}</b> 部影片
+        已勾選：<b>{selectedCount}</b> 部影片{" "}
         {typeof estimatedQuota === "number" ? (
           <span className="text-muted-foreground">
             （估算配額 {estimatedQuota}）
@@ -73,6 +95,7 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
           className="border rounded px-2 py-1 text-sm"
           value={currentTargetId ?? ""}
           onChange={handleSelectChange}
+          disabled={targetDisabled}
         >
           <option value="">選擇目標播放清單</option>
           {playlists.map((p) => (
@@ -82,41 +105,61 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
           ))}
         </select>
 
+        {/* 新增到清單（需選目標且有勾選） */}
         <Button
-          type="button" // ✅ 明確指定
           size="sm"
           variant="secondary"
-          onClick={onAdd}
-          disabled={disabled}
+          onClick={() => onAdd(currentTargetId)}
+          disabled={addBusy || nothingSelected || !currentTargetId}
         >
-          新增到清單
+          {addBusy ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              新增中…
+            </>
+          ) : (
+            "新增到清單"
+          )}
         </Button>
 
+        {/* 從原清單移除（不需目標） */}
         <Button
-          type="button" // ✅ 明確指定
           size="sm"
           variant="outline"
           onClick={onRemove}
-          disabled={disabled}
+          disabled={removeBusy || nothingSelected}
         >
-          從原清單移除
+          {removeBusy ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              移除中…
+            </>
+          ) : (
+            "從原清單移除"
+          )}
         </Button>
 
-        {/* 呼叫 onMove 並把目前選取目標帶出去 */}
+        {/* 一併移轉（需選目標且有勾選） */}
         <Button
-          type="button" // ✅ 明確指定
           size="sm"
           onClick={() => onMove(currentTargetId)}
-          disabled={disabled || !currentTargetId}
+          disabled={moveBusy || nothingSelected || !currentTargetId}
         >
-          一併移轉
+          {moveBusy ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              移轉中…
+            </>
+          ) : (
+            "一併移轉"
+          )}
         </Button>
 
         <Button
-          type="button" // ✅ 明確指定
           size="sm"
           variant="ghost"
           onClick={onUndo}
+          disabled={busyAll /* 可視情況也跟個別 busy 綁 */}
         >
           復原
         </Button>

@@ -17,7 +17,7 @@ import { PlaylistList } from "@/app/components/PlaylistList";
 import { Button } from "@/app/components/ui/button";
 import { Checkbox } from "@/app/components/ui/checkbox";
 import { ActionsToolbar } from "@/app/components/ActionsToolbar";
-// import { TopBar } from "@/app/components/TopBar";
+import { ProgressToast } from "@/app/components/ProgressToast";
 
 /* =========================
  * 型別與共用工具
@@ -132,6 +132,49 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
 
 async function fetchAuth(): Promise<AuthState> {
   return apiRequest<AuthState>("/api/auth/me");
+}
+
+// 把一批「暫時的影片資料」加到目標清單的快取（若不存在則忽略）
+function addToPlaylistCache(
+  queryClient: import("@tanstack/react-query").QueryClient,
+  playlistId: string,
+  addItems: PlaylistItemSummary[]
+) {
+  const key = ["playlist-items", playlistId] as const;
+  const prev = queryClient.getQueryData<{
+    playlist: PlaylistSummary;
+    items: PlaylistItemSummary[];
+  }>(key);
+  if (!prev) return;
+  const existingIds = new Set(prev.items.map((it) => it.videoId));
+  const next = {
+    ...prev,
+    items: [
+      ...prev.items,
+      ...addItems.filter((it) => !existingIds.has(it.videoId)),
+    ],
+  };
+  queryClient.setQueryData(key, next);
+}
+
+// 從快取移除一批「暫時插入」的項目（用 temp-<videoId> 規則）
+function removeTempFromPlaylistCache(
+  queryClient: import("@tanstack/react-query").QueryClient,
+  playlistId: string,
+  videoIds: string[]
+) {
+  const key = ["playlist-items", playlistId] as const;
+  const prev = queryClient.getQueryData<{
+    playlist: PlaylistSummary;
+    items: PlaylistItemSummary[];
+  }>(key);
+  if (!prev) return;
+  const tempSet = new Set(videoIds.map((v) => `temp-${v}`));
+  const next = {
+    ...prev,
+    items: prev.items.filter((it) => !tempSet.has(it.playlistItemId)),
+  };
+  queryClient.setQueryData(key, next);
 }
 
 // 把某個 playlist 的快取 items 過濾掉指定 playlistItemIds
@@ -340,6 +383,12 @@ export default function HomeClient() {
   /* ---- 視圖狀態 ---- */
   const [view, setView] = React.useState<View>("select-playlists");
 
+  // ✅ 共用 ProgressToast 狀態
+  const [actionToast, setActionToast] = React.useState<{
+    status: "idle" | "loading" | "success" | "error";
+    label: string;
+  }>({ status: "idle", label: "" });
+
   /* ---- 稿件 1：多選播放清單 ---- */
   const [checkedPlaylistIds, setCheckedPlaylistIds] = React.useState<
     Set<string>
@@ -413,17 +462,94 @@ export default function HomeClient() {
   );
 
   /* ---- Mutations ---- */
+  function makeIdemKey(prefix = "op") {
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
   const addMutation = useMutation({
-    mutationFn: (payload: { targetPlaylistId: string; videoIds: string[] }) =>
+    mutationFn: (payload: {
+      targetPlaylistId: string;
+      videoIds: string[];
+      idempotencyKey?: string;
+    }) =>
       apiRequest<OperationResult>("/api/bulk/add", {
         method: "POST",
         body: JSON.stringify(payload),
       }),
+
+    // ⭐ 樂觀更新
+    onMutate: async (variables) => {
+      const { targetPlaylistId, videoIds } = variables;
+
+      setActionToast({ status: "loading", label: "新增到播放清單" });
+
+      await queryClient.cancelQueries({
+        queryKey: ["playlist-items", targetPlaylistId],
+      });
+
+      // 蒐集 meta → 樂觀插入
+      const metaByVideoId = new Map<string, PlaylistItemSummary>();
+      columnsData.forEach((q) => {
+        const data = q.data;
+        if (!data) return;
+        data.items.forEach((it) => {
+          if (selectedMap[data.playlist.id]?.has(it.playlistItemId)) {
+            metaByVideoId.set(it.videoId, {
+              playlistItemId: `temp-${it.videoId}`,
+              videoId: it.videoId,
+              title: it.title,
+              channelTitle: it.channelTitle,
+              thumbnailUrl: it.thumbnailUrl ?? null,
+              position: null,
+            });
+          }
+        });
+      });
+
+      const optimisticItems: PlaylistItemSummary[] = videoIds.map((vid) => {
+        const meta = metaByVideoId.get(vid);
+        return {
+          playlistItemId: `temp-${vid}`,
+          videoId: vid,
+          title: meta?.title ?? "（待載入）",
+          channelTitle: meta?.channelTitle ?? "",
+          thumbnailUrl: meta?.thumbnailUrl ?? null,
+          position: null,
+        };
+      });
+
+      addToPlaylistCache(queryClient, targetPlaylistId, optimisticItems);
+
+      const key = ["playlist-items", targetPlaylistId] as const;
+      const hadCache = Boolean(queryClient.getQueryData(key));
+      return { targetPlaylistId, videoIds, hadCache };
+    },
+
+    onError: (_error, _vars, ctx) => {
+      setActionToast({ status: "error", label: "新增到播放清單" });
+      if (ctx?.hadCache) {
+        removeTempFromPlaylistCache(
+          queryClient,
+          ctx.targetPlaylistId,
+          ctx.videoIds
+        );
+      }
+    },
+
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["playlists"] });
-      confirmedPlaylists.forEach((p) =>
-        queryClient.invalidateQueries({ queryKey: ["playlist-items", p.id] })
-      );
+      setActionToast({ status: "success", label: "新增到播放清單" });
+    },
+
+    onSettled: async (_data, _error, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+      await queryClient.invalidateQueries({
+        queryKey: ["playlist-items", variables.targetPlaylistId],
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      await queryClient.refetchQueries({
+        queryKey: ["playlist-items", variables.targetPlaylistId],
+      });
+      setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
     },
   });
 
@@ -431,6 +557,7 @@ export default function HomeClient() {
     mutationFn: (payload: {
       playlistItemIds: string[];
       sourcePlaylistId: string;
+      idempotencyKey?: string;
     }) =>
       apiRequest<OperationResult>("/api/bulk/remove", {
         method: "POST",
@@ -441,48 +568,52 @@ export default function HomeClient() {
     onMutate: async (variables) => {
       const { sourcePlaylistId, playlistItemIds } = variables;
 
-      // 1) 取消進行中的同鍵查詢，避免它覆蓋我們的樂觀結果
+      setActionToast({ status: "loading", label: "從清單移除" });
+
       await queryClient.cancelQueries({
         queryKey: ["playlist-items", sourcePlaylistId],
       });
 
-      // 2) 拿快照
       const key = ["playlist-items", sourcePlaylistId] as const;
       const snapshot = queryClient.getQueryData<{
         playlist: PlaylistSummary;
         items: PlaylistItemSummary[];
       }>(key);
 
-      // 3) 立即從快取移除（畫面立刻消失）
+      const backupRemoved =
+        snapshot?.items.filter((i) =>
+          playlistItemIds.includes(i.playlistItemId)
+        ) ?? [];
+
       removeFromPlaylistCache(queryClient, sourcePlaylistId, playlistItemIds);
 
-      // 4) 同時把選取狀態清空
+      // 清該欄的選取狀態
       setSelectedMap((prev) => ({ ...prev, [sourcePlaylistId]: new Set() }));
 
-      // 5) 傳回快照給 onError 回滾用
-      return { key, snapshot };
+      return { key, snapshot, sourcePlaylistId, backupRemoved };
     },
 
-    // 失敗 → 回滾
-    onError: (_err, _variables, context) => {
-      if (context?.key && context?.snapshot) {
-        queryClient.setQueryData(context.key, context.snapshot);
+    onError: (_err, _variables, ctx) => {
+      if (ctx?.key && ctx?.snapshot) {
+        queryClient.setQueryData(ctx.key, ctx.snapshot);
       }
+      setActionToast({ status: "error", label: "從清單移除" });
     },
 
-    // 成功或失敗都會進來
+    onSuccess: () => {
+      setActionToast({ status: "success", label: "從清單移除" });
+    },
+
     onSettled: async (_data, _error, variables) => {
-      // 先做一次 invalidation（背景更新）
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
       await queryClient.invalidateQueries({
         queryKey: ["playlist-items", variables.sourcePlaylistId],
       });
-
-      // 再等 200ms 做一次強制 refetch（吃掉 YouTube 最終一致性）
       await new Promise((r) => setTimeout(r, 200));
       await queryClient.refetchQueries({
         queryKey: ["playlist-items", variables.sourcePlaylistId],
       });
+      setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
     },
   });
 
@@ -491,23 +622,118 @@ export default function HomeClient() {
       sourcePlaylistId: string;
       targetPlaylistId: string;
       items: Array<{ playlistItemId: string; videoId: string }>;
+      idempotencyKey?: string;
     }) =>
       apiRequest<OperationResult>("/api/bulk/move", {
         method: "POST",
         body: JSON.stringify(payload),
       }),
-    onSuccess: (_, variables) => {
-      setSelectedMap((prev) => ({
-        ...prev,
-        [variables.sourcePlaylistId]: new Set(),
-      }));
-      queryClient.invalidateQueries({ queryKey: ["playlists"] });
-      queryClient.invalidateQueries({
-        queryKey: ["playlist-items", variables.sourcePlaylistId],
-      });
-      queryClient.invalidateQueries({
-        queryKey: ["playlist-items", variables.targetPlaylistId],
-      });
+
+    // ⭐ 雙邊樂觀（來源移除 + 目標加入暫時列）
+    onMutate: async ({ sourcePlaylistId, targetPlaylistId, items }) => {
+      setActionToast({ status: "loading", label: "一併移轉" });
+
+      await Promise.all([
+        queryClient.cancelQueries({
+          queryKey: ["playlist-items", sourcePlaylistId],
+        }),
+        queryClient.cancelQueries({
+          queryKey: ["playlist-items", targetPlaylistId],
+        }),
+      ]);
+
+      const srcKey = ["playlist-items", sourcePlaylistId] as const;
+      const srcPrev = queryClient.getQueryData<{
+        playlist: PlaylistSummary;
+        items: PlaylistItemSummary[];
+      }>(srcKey);
+
+      const movingItems =
+        srcPrev?.items.filter((i) =>
+          items.some((x) => x.playlistItemId === i.playlistItemId)
+        ) ?? [];
+
+      // 樂觀：來源先移除
+      removeFromPlaylistCache(
+        queryClient,
+        sourcePlaylistId,
+        items.map((it) => it.playlistItemId)
+      );
+
+      // 樂觀：目標先加入「暫時項目」
+      const optimisticTargetItems: PlaylistItemSummary[] = movingItems.map(
+        (i) => ({
+          playlistItemId: `temp-${i.videoId}`,
+          videoId: i.videoId,
+          title: i.title,
+          channelTitle: i.channelTitle,
+          thumbnailUrl: i.thumbnailUrl ?? null,
+          position: null,
+        })
+      );
+      addToPlaylistCache(queryClient, targetPlaylistId, optimisticTargetItems);
+
+      // 清來源欄的選取
+      setSelectedMap((prev) => ({ ...prev, [sourcePlaylistId]: new Set() }));
+
+      return {
+        sourcePlaylistId,
+        targetPlaylistId,
+        backupSourceItems: movingItems,
+        optimisticTargetVideoIds: movingItems.map((i) => i.videoId),
+      };
+    },
+
+    onError: (_e, _vars, ctx) => {
+      if (ctx) {
+        // 回滾來源
+        if (ctx.backupSourceItems?.length) {
+          const key = ["playlist-items", ctx.sourcePlaylistId] as const;
+          const prev = queryClient.getQueryData<{
+            playlist: PlaylistSummary;
+            items: PlaylistItemSummary[];
+          }>(key);
+          if (prev) {
+            queryClient.setQueryData(key, {
+              ...prev,
+              items: [...prev.items, ...ctx.backupSourceItems],
+            });
+          }
+        }
+        // 移除目標暫時列
+        removeTempFromPlaylistCache(
+          queryClient,
+          ctx.targetPlaylistId,
+          ctx.optimisticTargetVideoIds
+        );
+      }
+      setActionToast({ status: "error", label: "一併移轉" });
+    },
+
+    onSuccess: () => {
+      setActionToast({ status: "success", label: "一併移轉" });
+    },
+
+    onSettled: async (_d, _e, { sourcePlaylistId, targetPlaylistId }) => {
+      await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["playlist-items", sourcePlaylistId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["playlist-items", targetPlaylistId],
+        }),
+      ]);
+      await new Promise((r) => setTimeout(r, 150));
+      await Promise.all([
+        queryClient.refetchQueries({
+          queryKey: ["playlist-items", sourcePlaylistId],
+        }),
+        queryClient.refetchQueries({
+          queryKey: ["playlist-items", targetPlaylistId],
+        }),
+      ]);
+      setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
     },
   });
 
@@ -540,23 +766,32 @@ export default function HomeClient() {
 
   /* ---- 動作列 Callback ---- */
 
-  const handleAddSelected = () => {
+  // 由 DDL 決定目標，不再使用 prompt
+  const handleAddSelected = (targetIdFromToolbar?: string | null) => {
+    const to = (targetIdFromToolbar ?? targetPlaylistId) || null;
+    if (!to) {
+      window.alert("請先在工具列的下拉選單選擇【目標播放清單】。");
+      return;
+    }
+
     const { allVideoIds } = getSelectedFromAllColumns();
     if (allVideoIds.length === 0) return;
 
-    // Add 保持原行為（若你也想走 DDL，可和 Move 同樣改法）
-    const hint =
-      "輸入目標播放清單 ID（或精準標題）。\n可用的清單：\n" +
-      allPlaylists.map((p) => `• ${p.title} (${p.id})`).join("\n");
-    const input = window.prompt(hint) || "";
-    const to =
-      allPlaylists.find((p) => p.id === input || p.title === input)?.id ?? "";
-    if (!to) return;
+    const targetName =
+      allPlaylists.find((p) => p.id === to)?.title ?? `(ID: ${to})`;
+    const ok = window.confirm(
+      `確認要將已勾選的 ${allVideoIds.length} 部影片新增到「${targetName}」嗎？`
+    );
+    if (!ok) return;
 
-    addMutation.mutate({ targetPlaylistId: to, videoIds: allVideoIds });
+    addMutation.mutate({
+      targetPlaylistId: to,
+      videoIds: allVideoIds,
+      idempotencyKey: makeIdemKey("add"),
+    });
   };
 
-  // ⭐ 修正重點：優先使用 DDL 的目標；若沒有就提醒，不再使用 prompt；加入二次確認
+  // 一併移轉（以 DDL 決定目標）
   const handleMoveSelected = (targetIdFromToolbar?: string | null) => {
     const to = (targetIdFromToolbar ?? targetPlaylistId) || null;
     if (!to) {
@@ -574,7 +809,7 @@ export default function HomeClient() {
     );
     if (!ok) return;
 
-    // 逐來源清單執行 move
+    // 逐來源清單執行 move（可序列化送出）
     Object.entries(selectedMap).forEach(([sourcePlaylistId, set]) => {
       const itemsInSource =
         columnsData
@@ -588,6 +823,7 @@ export default function HomeClient() {
             playlistItemId: it.playlistItemId,
             videoId: it.videoId,
           })),
+          idempotencyKey: makeIdemKey("move"),
         });
       }
     });
@@ -597,7 +833,11 @@ export default function HomeClient() {
     Object.entries(selectedMap).forEach(([sourcePlaylistId, set]) => {
       const ids = Array.from(set);
       if (ids.length > 0) {
-        removeMutation.mutate({ playlistItemIds: ids, sourcePlaylistId });
+        removeMutation.mutate({
+          playlistItemIds: ids,
+          sourcePlaylistId,
+          idempotencyKey: makeIdemKey("remove"),
+        });
       }
     });
   };
@@ -721,8 +961,6 @@ export default function HomeClient() {
 
   return (
     <div className="min-h-dvh">
-      {/* <TopBar /> */}
-
       {view === "select-playlists" ? (
         /* ---------- UI 稿件 1：多選播放清單 ---------- */
         <main className="mx-auto max-w-6xl p-6 space-y-8">
@@ -793,18 +1031,17 @@ export default function HomeClient() {
             <ActionsToolbar
               selectedCount={totalSelectedCount}
               playlists={allPlaylists}
-              selectedPlaylistId={targetPlaylistId} // ✅ 受控目標清單
-              onTargetChange={setTargetPlaylistId} // ✅ 受控回傳
+              selectedPlaylistId={targetPlaylistId}
+              onTargetChange={setTargetPlaylistId}
               onAdd={handleAddSelected}
               onRemove={handleRemoveSelected}
-              onMove={(tid?: string | null) => handleMoveSelected(tid)} // ✅ 帶入目標
+              onMove={(tid?: string | null) => handleMoveSelected(tid)}
               onUndo={onUndo}
-              isLoading={
-                addMutation.isPending ||
-                removeMutation.isPending ||
-                moveMutation.isPending
-              }
               estimatedQuota={estimatedQuota}
+              /* ✅ 進階版：各自 loading */
+              addLoading={addMutation.isPending}
+              removeLoading={removeMutation.isPending}
+              moveLoading={moveMutation.isPending}
             />
           </section>
 
@@ -891,6 +1128,12 @@ export default function HomeClient() {
           </section>
         </main>
       )}
+      {/* ✅ 共用一次 ProgressToast */}
+      <ProgressToast
+        status={actionToast.status}
+        actionLabel={actionToast.label}
+        successMessage="操作完成"
+      />
     </div>
   );
 }

@@ -1,13 +1,35 @@
-// /api/bulk/add/route.ts
+// app/api/bulk/add/route.ts
 import type { NextRequest } from "next/server";
+import { cookies } from "next/headers";
 import { jsonError, jsonOk } from "@/lib/result";
 import { bulkAddSchema } from "@/validators/bulk";
 import { performBulkAdd, getActionSummary } from "@/lib/actions-service";
 import { checkIdempotencyKey, registerIdempotencyKey } from "@/lib/idempotency";
 import { requireUserId } from "@/lib/auth";
-import { getYouTubeClientEx } from "@/lib/google"; // ✅ 新增這行
+import { getUserTokens } from "@/lib/google";
+import { logger } from "@/lib/logger";
+
+export const dynamic = "force-dynamic";
+
+// 與 move/remove 共用的 userId 解析：先走 requireUserId(req)，失敗再從 cookies() 讀
+async function getUserIdFromRequest(req: NextRequest): Promise<string | null> {
+  try {
+    const u = await requireUserId(req as any); // ✅ 記得 await
+    if (u?.userId) return u.userId;
+  } catch {}
+  try {
+    const store = await cookies();
+    const raw = store.get("ytpm_session")?.value;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.userId) return String(parsed.userId);
+    }
+  } catch {}
+  return null;
+}
 
 export async function POST(request: NextRequest) {
+  // 1) 讀取並驗證 body
   let body: unknown;
   try {
     body = await request.json();
@@ -15,53 +37,35 @@ export async function POST(request: NextRequest) {
     return jsonError("invalid_request", "Invalid JSON body", { status: 400 });
   }
 
-  const parseResult = bulkAddSchema.safeParse(body);
-  if (!parseResult.success) {
-    return jsonError("invalid_request", parseResult.error.message, {
-      status: 400,
-    });
+  const parsed = bulkAddSchema.safeParse(body);
+  if (!parsed.success) {
+    return jsonError("invalid_request", parsed.error.message, { status: 400 });
   }
+  const payload = parsed.data;
 
-  const payload = parseResult.data;
-  const auth = requireUserId();
-  if (!auth) {
+  // 2) 解析 userId（⚠️ 這裡一定要 await）
+  const userId = await getUserIdFromRequest(request);
+  if (!userId) {
     return jsonError("unauthorized", "Sign in to continue", { status: 401 });
   }
 
-  const userId = auth.userId;
+  // 3) 先檢查 DB 內是否真的有 token（避免進到 service 才 fallback）
+  const tokens = await getUserTokens(userId);
+  if (!tokens || (!tokens.access_token && !tokens.refresh_token)) {
+    logger.warn({ userId }, "[bulk/add] no tokens");
+    return jsonError(
+      "no_tokens",
+      "YouTube authorization missing or expired. Please sign in again.",
+      { status: 400 }
+    );
+  }
+
+  // 4) 冪等鍵
   const idempotencyKey =
     request.headers.get("idempotency-key") ??
     payload.idempotencyKey ??
     undefined;
 
-  // ✅ 驗證是否有有效 token（嚴格模式）
-  try {
-    const { yt, mock } = await getYouTubeClientEx({
-      userId,
-      requireReal: true,
-    });
-    if (!yt || mock) {
-      return jsonError(
-        "no_tokens",
-        "No valid Google OAuth tokens found. Please sign in again.",
-        { status: 400 }
-      );
-    }
-  } catch (err: any) {
-    if (err.code === "NO_TOKENS") {
-      return jsonError(
-        "no_tokens",
-        "YouTube authorization missing or expired. Please sign in again.",
-        { status: 400 }
-      );
-    }
-    console.error("[bulk/add] getYouTubeClientEx error:", err);
-    return jsonError("internal_error", "Failed to initialize YouTube client.", {
-      status: 500,
-    });
-  }
-
-  // ✅ 確保 idempotency key
   if (idempotencyKey && checkIdempotencyKey(idempotencyKey)) {
     const summary = getActionSummary(idempotencyKey);
     if (summary && summary.action.userId === userId) {
@@ -73,7 +77,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // ✅ 真正執行 bulk add
+  // 5) 執行
   const result = await performBulkAdd(payload, {
     userId,
     actionId: idempotencyKey,
