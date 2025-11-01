@@ -4,58 +4,83 @@ import { clearSessionCookie, getCurrentUser } from "@/lib/auth";
 import { deleteTokensByUserId, getTokensByUserId } from "@/lib/tokens";
 import { revokeRefreshToken, revokeAccessToken } from "@/lib/google-revoke";
 
+// ✅ 確保使用 Node.js runtime（better-sqlite3 需要）
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * POST：前端 fetch 登出
- */
 export async function POST() {
   try {
-    // 1) 取得目前登入使用者（你若已有其它方法，沿用即可）
-    const user = await getCurrentUser(); // 需回傳 { id: string } or null
+    // 1) 取目前使用者（容錯：沒有也照樣清 cookie）
+    const user = await getCurrentUser();
     const userId = user?.id ?? null;
 
-    // 2) 取出 DB 內 token（若需要 revoke）
-    const tokens = userId ? await getTokensByUserId(userId) : null;
+    // 2) 可選：讀 DB token（有才嘗試 revoke）
+    let tokens: {
+      access_token?: string | null;
+      refresh_token?: string | null;
+    } | null = null;
+    if (userId) {
+      try {
+        tokens = await getTokensByUserId(userId);
+      } catch (e) {
+        // 不阻塞登出，但記 log 診斷
+        console.error("[logout] getTokensByUserId failed:", e);
+      }
+    }
 
-    // 3) 先嘗試 revoke（不阻塞流程）
+    // 3) Revoke（不阻塞：任何錯誤都吞掉）
     try {
       if (tokens?.refresh_token) {
         await revokeRefreshToken(tokens.refresh_token);
       }
-      // access_token 通常快過期，可選
       if (tokens?.access_token) {
         await revokeAccessToken(tokens.access_token);
       }
-    } catch {
-      // 忽略 revoke 失敗
+    } catch (e) {
+      console.warn("[logout] revoke token failed:", e);
     }
 
-    // 4) 清 DB（依 userId）
+    // 4) 清 DB（不阻塞）
     if (userId) {
-      await deleteTokensByUserId(userId);
+      try {
+        await deleteTokensByUserId(userId);
+      } catch (e) {
+        console.error("[logout] deleteTokensByUserId failed:", e);
+      }
     }
 
-    // 5) 清 Cookie
-    await clearSessionCookie();
+    // 5) 清 cookie（可一起把 OAuth 相關也清掉）
+    await clearSessionCookie([
+      "access_token",
+      "refresh_token",
+      "google_oauth_state",
+      "google_oauth_verifier",
+      "ytpm_uid",
+    ]);
 
     return NextResponse.json(
       { ok: true, data: { success: true } },
       { headers: { "Cache-Control": "no-store" } }
     );
-  } catch {
+  } catch (e: any) {
+    // ✅ 回傳可診斷訊息（僅開發期有用；上線可拿掉 error 文本）
+    console.error("[logout] fatal:", e);
     return NextResponse.json(
-      { ok: false, error: "logout_failed" },
-      { status: 500 }
+      { ok: false, error: "logout_failed", detail: String(e?.message ?? e) },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
 }
 
-/**
- * GET：也支援直接導向
- */
 export async function GET() {
-  await clearSessionCookie();
+  // 單純清 cookie + redirect（不做 DB / revoke）
+  await clearSessionCookie([
+    "access_token",
+    "refresh_token",
+    "google_oauth_state",
+    "google_oauth_verifier",
+    "ytpm_uid",
+  ]);
   return NextResponse.redirect(
     new URL("/", process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"),
     {

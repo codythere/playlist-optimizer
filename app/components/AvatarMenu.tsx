@@ -55,11 +55,17 @@ export function AvatarMenu({
         </div>
         <DropdownMenuSeparator />
 
-        <DropdownMenuItem onClick={() => router.push("/profile")}>
+        <DropdownMenuItem
+          disabled={true}
+          onClick={() => router.push("/profile")}
+        >
           <User className="mr-2 h-4 w-4" /> Profile
         </DropdownMenuItem>
 
-        <DropdownMenuItem onClick={() => router.push("/settings")}>
+        <DropdownMenuItem
+          disabled={true}
+          onClick={() => router.push("/settings")}
+        >
           <Settings className="mr-2 h-4 w-4" /> Settings
         </DropdownMenuItem>
 

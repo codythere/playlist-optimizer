@@ -164,7 +164,13 @@ export function AppShell({
                 ) : (
                   <button
                     className="rounded-md px-3 py-1.5 text-sm font-medium hover:bg-accent"
-                    onClick={() => router.push("/login")}
+                    onClick={() =>
+                      router.push(
+                        `/login?redirect=${encodeURIComponent(
+                          window.location.pathname
+                        )}`
+                      )
+                    }
                   >
                     Login
                   </button>
