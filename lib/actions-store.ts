@@ -1,5 +1,6 @@
+// lib/actions-store.ts (Postgres 版)
 import { nanoid } from "nanoid";
-import { db } from "./db";
+import { query, withTransaction } from "@/lib/db";
 import type {
   ActionCounts,
   ActionItemRecord,
@@ -9,15 +10,24 @@ import type {
   ActionType,
 } from "@/types/actions";
 
+type IsoLike = string | Date | null;
+
+// 將資料庫回傳的時間（可能是字串）轉成 ISO 字串
+function toIsoUtc(ts: IsoLike): string | null {
+  if (!ts) return null;
+  const d = typeof ts === "string" ? new Date(ts) : ts;
+  return d.toISOString();
+}
+
 interface ActionRow {
   id: string;
-  user_id: string;
+  user_id: string | null;
   type: ActionType;
   source_playlist_id: string | null;
   target_playlist_id: string | null;
   status: ActionStatus;
-  created_at: string;
-  finished_at: string | null;
+  created_at: string | Date;
+  finished_at: string | Date | null;
   parent_action_id: string | null;
 }
 
@@ -34,120 +44,19 @@ interface ActionItemRow {
   status: ActionItemStatus;
   error_code: string | null;
   error_message: string | null;
-}
-
-const insertActionStmt = db.prepare(
-  `INSERT INTO actions (
-    id,
-    user_id,
-    type,
-    source_playlist_id,
-    target_playlist_id,
-    status,
-    created_at,
-    parent_action_id
-  ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`
-);
-
-const updateActionStatusStmt = db.prepare(
-  `UPDATE actions
-   SET status = ?,
-       finished_at = CASE WHEN ? IS NOT NULL THEN ? ELSE finished_at END
-   WHERE id = ?`
-);
-
-const selectActionByIdStmt = db.prepare("SELECT * FROM actions WHERE id = ?");
-
-const selectActionsPageStmt = db.prepare(
-  `SELECT * FROM actions
-   WHERE user_id = ?1
-     AND (?2 IS NULL OR created_at < ?2)
-   ORDER BY created_at DESC
-   LIMIT ?3`
-);
-
-const insertActionItemStmt = db.prepare(
-  `INSERT INTO action_items (
-    id,
-    action_id,
-    type,
-    video_id,
-    source_playlist_id,
-    target_playlist_id,
-    source_playlist_item_id,
-    target_playlist_item_id,
-    position,
-    status,
-    error_code,
-    error_message
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-);
-
-const selectActionItemByIdStmt = db.prepare(
-  "SELECT * FROM action_items WHERE id = ?"
-);
-
-const selectActionItemsStmt = db.prepare(
-  "SELECT * FROM action_items WHERE action_id = ? ORDER BY rowid ASC"
-);
-
-const countActionItemsStmt = db.prepare(
-  `SELECT
-      COUNT(*) as total,
-      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-    FROM action_items
-    WHERE action_id = ?`
-);
-
-const updateActionItemStmt = db.prepare(
-  `UPDATE action_items
-   SET status = ?,
-       error_code = ?,
-       error_message = ?,
-       target_playlist_item_id = ?
-   WHERE id = ?`
-);
-
-// === Items 分頁用（不影響既有 listActionItems） ===
-const selectActionItemRowidByIdStmt = db.prepare(
-  "SELECT rowid AS r FROM action_items WHERE id = ?"
-);
-
-// 以 rowid 升冪，使用普通 ? 佔位，避免序號綁定問題
-const selectActionItemsPageAscStmt = db.prepare(
-  `SELECT * FROM action_items
-   WHERE action_id = ?
-     AND (? IS NULL OR rowid > ?)
-   ORDER BY rowid ASC
-   LIMIT ?`
-);
-
-// ✅ 嚴格版：一定回傳 string
-function toIsoUtcStrict(ts: string): string {
-  if (!ts) return ts; // 如果你的 DB schema 保證非空，這行其實不會觸發
-  // SQLite CURRENT_TIMESTAMP: 'YYYY-MM-DD HH:MM:SS' (UTC)
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(ts)) {
-    return ts.replace(" ", "T") + "Z";
-  }
-  return ts; // 已是 ISO 或其他格式則原樣
-}
-
-// ✅ 可為 null 的版本
-function toIsoUtcNullable(ts: string | null): string | null {
-  return ts ? toIsoUtcStrict(ts) : null;
+  created_at: string | Date | null;
 }
 
 function mapAction(row: ActionRow): ActionRecord {
   return {
     id: row.id,
-    userId: row.user_id,
+    userId: row.user_id ?? "",
     type: row.type,
     sourcePlaylistId: row.source_playlist_id ?? null,
     targetPlaylistId: row.target_playlist_id ?? null,
     status: row.status,
-    createdAt: toIsoUtcStrict(row.created_at), // ★ 這裡
-    finishedAt: toIsoUtcNullable(row.finished_at), // ★ 這裡
+    createdAt: toIsoUtc(row.created_at)!,
+    finishedAt: toIsoUtc(row.finished_at),
     parentActionId: row.parent_action_id ?? null,
   };
 }
@@ -169,7 +78,8 @@ function mapActionItem(row: ActionItemRow): ActionItemRecord {
   };
 }
 
-export function createAction(params: {
+/** 建立一筆 action */
+export async function createAction(params: {
   id?: string;
   userId: string;
   type: ActionType;
@@ -177,44 +87,49 @@ export function createAction(params: {
   targetPlaylistId?: string | null;
   status?: ActionStatus;
   parentActionId?: string | null;
-}): ActionRecord {
+}): Promise<ActionRecord> {
   const id = params.id ?? nanoid();
   const status = params.status ?? "pending";
-  insertActionStmt.run(
-    id,
-    params.userId,
-    params.type,
-    params.sourcePlaylistId ?? null,
-    params.targetPlaylistId ?? null,
-    status,
-    params.parentActionId ?? null
+
+  const { rows } = await query<ActionRow>(
+    `INSERT INTO actions (
+       id, user_id, type, source_playlist_id, target_playlist_id, status, created_at, parent_action_id
+     ) VALUES ($1,$2,$3,$4,$5,$6, now(), $7)
+     RETURNING *`,
+    [
+      id,
+      params.userId,
+      params.type,
+      params.sourcePlaylistId ?? null,
+      params.targetPlaylistId ?? null,
+      status,
+      params.parentActionId ?? null,
+    ]
   );
-  const row = selectActionByIdStmt.get(id) as ActionRow | undefined;
-  if (!row) {
-    throw new Error("Failed to load action after insert");
-  }
-  return mapAction(row);
+  if (!rows[0]) throw new Error("Failed to insert action");
+  return mapAction(rows[0]);
 }
 
-export function setActionStatus(
+/** 更新 action 狀態 */
+export async function setActionStatus(
   id: string,
   status: ActionStatus,
   finishedAt?: string | null
 ) {
-  updateActionStatusStmt.run(
-    status,
-    finishedAt ?? null,
-    finishedAt ?? null,
-    id
+  const { rows } = await query<ActionRow>(
+    `UPDATE actions
+       SET status = $1,
+           finished_at = COALESCE($2::timestamptz, finished_at)
+     WHERE id = $3
+     RETURNING *`,
+    [status, finishedAt ?? null, id]
   );
-  const row = selectActionByIdStmt.get(id) as ActionRow | undefined;
-  if (!row) {
-    throw new Error("Failed to load action after update");
-  }
-  return mapAction(row);
+  if (!rows[0]) throw new Error("Failed to update action");
+  return mapAction(rows[0]);
 }
 
-export function createActionItems(
+/** 批次建立 action_items（交易） */
+export async function createActionItems(
   items: Array<{
     id?: string;
     actionId: string;
@@ -231,31 +146,40 @@ export function createActionItems(
   }>
 ) {
   const created: ActionItemRecord[] = [];
-  for (const item of items) {
-    const id = item.id ?? nanoid();
-    insertActionItemStmt.run(
-      id,
-      item.actionId,
-      item.type,
-      item.videoId ?? null,
-      item.sourcePlaylistId ?? null,
-      item.targetPlaylistId ?? null,
-      item.sourcePlaylistItemId ?? null,
-      item.targetPlaylistItemId ?? null,
-      item.position ?? null,
-      item.status ?? "pending",
-      item.errorCode ?? null,
-      item.errorMessage ?? null
-    );
-    const row = selectActionItemByIdStmt.get(id) as ActionItemRow | undefined;
-    if (row) {
-      created.push(mapActionItem(row));
+  await withTransaction(async (client) => {
+    for (const item of items) {
+      const id = item.id ?? nanoid();
+      const { rows } = await client.query<ActionItemRow>(
+        `INSERT INTO action_items (
+           id, action_id, type, video_id,
+           source_playlist_id, target_playlist_id,
+           source_playlist_item_id, target_playlist_item_id,
+           position, status, error_code, error_message, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+         RETURNING *`,
+        [
+          id,
+          item.actionId,
+          item.type,
+          item.videoId ?? null,
+          item.sourcePlaylistId ?? null,
+          item.targetPlaylistId ?? null,
+          item.sourcePlaylistItemId ?? null,
+          item.targetPlaylistItemId ?? null,
+          item.position ?? null,
+          item.status ?? "pending",
+          item.errorCode ?? null,
+          item.errorMessage ?? null,
+        ]
+      );
+      if (rows[0]) created.push(mapActionItem(rows[0]));
     }
-  }
+  });
   return created;
 }
 
-export function updateActionItem(
+/** 更新 action_item 單筆 */
+export async function updateActionItem(
   id: string,
   updates: {
     status?: ActionItemStatus;
@@ -264,158 +188,144 @@ export function updateActionItem(
     targetPlaylistItemId?: string | null;
   }
 ) {
-  const existing = selectActionItemByIdStmt.get(id) as
-    | ActionItemRow
-    | undefined;
-  if (!existing) {
-    return null;
-  }
+  // 取原資料
+  const prev = await query<ActionItemRow>(
+    `SELECT * FROM action_items WHERE id = $1`,
+    [id]
+  );
+  const existing = prev.rows[0];
+  if (!existing) return null;
+
   const mergedStatus = updates.status ?? existing.status;
-  const mergedErrorCode = updates.errorCode ?? existing.error_code ?? null;
-  const mergedErrorMessage =
-    updates.errorMessage ?? existing.error_message ?? null;
+  const mergedCode = updates.errorCode ?? existing.error_code ?? null;
+  const mergedMsg = updates.errorMessage ?? existing.error_message ?? null;
   const mergedTarget =
     updates.targetPlaylistItemId ?? existing.target_playlist_item_id ?? null;
 
-  updateActionItemStmt.run(
-    mergedStatus,
-    mergedErrorCode,
-    mergedErrorMessage,
-    mergedTarget,
-    id
+  const { rows } = await query<ActionItemRow>(
+    `UPDATE action_items
+       SET status = $1,
+           error_code = $2,
+           error_message = $3,
+           target_playlist_item_id = $4
+     WHERE id = $5
+     RETURNING *`,
+    [mergedStatus, mergedCode, mergedMsg, mergedTarget, id]
   );
-  const row = selectActionItemByIdStmt.get(id) as ActionItemRow | undefined;
-  return row ? mapActionItem(row) : null;
+  return rows[0] ? mapActionItem(rows[0]) : null;
 }
 
-export function listActionItems(actionId: string) {
-  const rows = selectActionItemsStmt.all(actionId) as ActionItemRow[];
+export async function listActionItems(actionId: string) {
+  const { rows } = await query<ActionItemRow>(
+    `SELECT * FROM action_items
+      WHERE action_id = $1
+      ORDER BY created_at ASC, id ASC`,
+    [actionId]
+  );
   return rows.map(mapActionItem);
 }
 
-export function getActionById(id: string) {
-  const row = selectActionByIdStmt.get(id) as ActionRow | undefined;
-  return row ? mapAction(row) : null;
+export async function getActionById(id: string) {
+  const { rows } = await query<ActionRow>(
+    `SELECT * FROM actions WHERE id = $1`,
+    [id]
+  );
+  return rows[0] ? mapAction(rows[0]) : null;
 }
 
-export function listActions(
+/** 原本的 listActions（cursor = action.id）*/
+export async function listActions(
   userId: string,
   limit: number,
   cursor?: string | null
 ) {
-  let cursorTimestamp: string | null = null;
+  let cursorTs: string | null = null;
   if (cursor) {
-    const cursorAction = selectActionByIdStmt.get(cursor) as
-      | ActionRow
-      | undefined;
-    cursorTimestamp = cursorAction?.created_at ?? null;
+    const cur = await query<{ created_at: string }>(
+      `SELECT created_at FROM actions WHERE id = $1`,
+      [cursor]
+    );
+    cursorTs = cur.rows[0]?.created_at ?? null;
   }
-  const rows = selectActionsPageStmt.all(
-    userId,
-    cursorTimestamp,
-    limit
-  ) as ActionRow[];
+
+  const { rows } = await query<ActionRow>(
+    `SELECT * FROM actions
+       WHERE user_id = $1
+         AND ($2::timestamptz IS NULL OR created_at < $2)
+       ORDER BY created_at DESC
+       LIMIT $3`,
+    [userId, cursorTs, Math.max(1, limit)]
+  );
   return rows.map(mapAction);
 }
 
-export function getActionCounts(actionId: string): ActionCounts {
-  const row = countActionItemsStmt.get(actionId) as
-    | { total: number; success: number; failed: number }
-    | undefined;
+/** 統計某 action 的 item 成功/失敗/總數 */
+export async function getActionCounts(actionId: string): Promise<ActionCounts> {
+  const { rows } = await query<{
+    total: string;
+    success: string;
+    failed: string;
+  }>(
+    `SELECT
+       COUNT(*)::bigint as total,
+       SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::bigint as success,
+       SUM(CASE WHEN status='failed'  THEN 1 ELSE 0 END)::bigint as failed
+     FROM action_items
+     WHERE action_id = $1`,
+    [actionId]
+  );
+  const r = rows[0] ?? { total: "0", success: "0", failed: "0" };
   return {
-    total: row?.total ?? 0,
-    success: row?.success ?? 0,
-    failed: row?.failed ?? 0,
+    total: Number(r.total || 0),
+    success: Number(r.success || 0),
+    failed: Number(r.failed || 0),
   };
 }
 
-// ✅ 全新：不用序號參數（?1 ?2 ?3），只用普通 ? 佔位
-const selectActionsPageStmtNoIndex = db.prepare(
-  `SELECT * FROM actions
-   WHERE user_id = ?
-     AND (? IS NULL OR created_at < ?)
-   ORDER BY created_at DESC
-   LIMIT ?`
-);
-
-/**
- * ✅ 提供 /api/actions 專用的安全版分頁
- *   - 絕不動現有的 listActions()
- *   - 內部用普通 ? 佔位，並採多引數綁定（或陣列也行）
- */
-// /lib/actions-store.ts 內的 listActionsPageSafe()
-export function listActionsPageSafe(
+/** /api/actions 使用的安全版分頁（抓 limit+1 判斷 hasMore） */
+export async function listActionsPageSafe(
   userId: string,
   limit: number,
   cursor?: string | null
 ) {
-  let cursorTimestamp: string | null = null;
-  if (cursor) {
-    const cursorAction = selectActionByIdStmt.get(cursor) as
-      | ActionRow
-      | undefined;
-    cursorTimestamp = cursorAction?.created_at ?? null;
-  }
-
-  // ⬇️ 這行改成 4 個參數：cursorTimestamp 要傳兩次
-  const rows = selectActionsPageStmtNoIndex.all(
-    userId,
-    cursorTimestamp,
-    cursorTimestamp,
-    limit
-  ) as ActionRow[];
-
-  return rows.map(mapAction);
+  return listActions(userId, limit, cursor);
 }
 
-// =========================
-// Items 分頁（rowid 方式，安全版）
-// =========================
-
-// 取某 item 的 rowid（拿來當 cursor）
-const selectItemRowidByIdStmt = db.prepare(
-  `SELECT rowid as rid FROM action_items WHERE id = ?`
-);
-
-// 用普通 ? 佔位，避免 ?1/?2 混淆
-const selectActionItemsPageStmtNoIndex = db.prepare(
-  `SELECT * FROM action_items
-   WHERE action_id = ?
-     AND (? IS NULL OR rowid > ?)
-   ORDER BY rowid ASC
-   LIMIT ?`
-);
-
-/**
- * listActionItemsPageSafe
- * - 依 rowid 升冪分頁
- * - cursor 為「上一頁最後一筆 item 的 id」（不是 rowid），內部會轉成 rowid
- * - 回傳 { items, nextCursor }
- */
-export function listActionItemsPageSafe(
+/** Items 分頁（以 created_at,id 升冪；cursor = 上一頁最後一筆的 id） */
+export async function listActionItemsPageSafe(
   actionId: string,
   limit: number,
   cursor?: string | null
-): { items: ActionItemRecord[]; nextCursor: string | null } {
-  let cursorRid: number | null = null;
+): Promise<{ items: ActionItemRecord[]; nextCursor: string | null }> {
+  let cursorCreatedAt: string | null = null;
+  let cursorId: string | null = null;
+
   if (cursor) {
-    const r = selectItemRowidByIdStmt.get(cursor) as
-      | { rid: number }
-      | undefined;
-    cursorRid = r?.rid ?? null;
+    const cur = await query<{ created_at: string; id: string }>(
+      `SELECT created_at, id FROM action_items WHERE id = $1`,
+      [cursor]
+    );
+    if (cur.rows[0]) {
+      cursorCreatedAt = cur.rows[0].created_at;
+      cursorId = cur.rows[0].id;
+    }
   }
 
-  const rows = selectActionItemsPageStmtNoIndex.all(
-    actionId,
-    cursorRid,
-    cursorRid,
-    limit + 1 // 多抓一筆看有沒有下一頁
-  ) as ActionItemRow[];
+  const { rows } = await query<ActionItemRow>(
+    `SELECT * FROM action_items
+       WHERE action_id = $1
+         AND (
+           $2::timestamptz IS NULL
+           OR (created_at, id) > ($2::timestamptz, $3::text)
+         )
+       ORDER BY created_at ASC, id ASC
+       LIMIT $4`,
+    [actionId, cursorCreatedAt, cursorId, Math.max(1, limit + 1)]
+  );
 
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const items = pageRows.map(mapActionItem);
   const nextCursor = hasMore ? pageRows[pageRows.length - 1].id : null;
-
   return { items, nextCursor };
 }

@@ -1,4 +1,4 @@
-// lib/actions-service.ts
+// lib/actions-service.ts (PG async-ready)
 import { nanoid } from "nanoid";
 import { logger } from "./logger";
 import { getYouTubeClient } from "./google";
@@ -19,11 +19,9 @@ import type {
   ActionRecord,
 } from "@/types/actions";
 
-// validators 型別
 import type {
   BulkMovePayload,
   BulkAddPayload,
-  // 如果你的 validators/bulk 沒有匯出 BulkRemovePayload，就暫時用下面的 fallback 型別
   BulkRemovePayload,
 } from "@/validators/bulk";
 
@@ -34,7 +32,7 @@ export interface OperationResult {
   items: ActionItemRecord[];
   counts: ActionCounts;
   estimatedQuota: number;
-  usingMock: boolean; // 寫入操作固定為 false（嚴格模式）
+  usingMock: boolean;
 }
 
 const INSERT_DELETE_QUOTA_COST = 50;
@@ -58,7 +56,6 @@ async function retryTransient<T>(
       const code = (parsed.code || "").toUpperCase();
       const msg = (parsed.message || "").toLowerCase();
 
-      // 把 409 ABORTED / SERVICE_UNAVAILABLE / aborted 視為暫時性
       const isTransient =
         code === "SERVICE_UNAVAILABLE" ||
         code === "ABORTED" ||
@@ -69,7 +66,6 @@ async function retryTransient<T>(
 
       if (!isTransient || i === retries) break;
 
-      // 退避 + 抖動
       const delay =
         Math.min(baseMs * Math.pow(2, i), maxMs) * (1 + Math.random() * 0.3);
       await new Promise((r) => setTimeout(r, delay));
@@ -78,8 +74,9 @@ async function retryTransient<T>(
   throw lastErr;
 }
 
-function finalize(actionId: string) {
-  const counts = getActionCounts(actionId);
+/** 封裝結案＋統計（PG 版全 async） */
+async function finalize(actionId: string) {
+  const counts = await getActionCounts(actionId);
   const status =
     counts.total === 0
       ? "success"
@@ -88,20 +85,24 @@ function finalize(actionId: string) {
       : counts.failed > 0
       ? "partial"
       : "success";
-  const finalAction = setActionStatus(
+
+  const finalAction = await setActionStatus(
     actionId,
     status,
     new Date().toISOString()
   );
-  const items = listActionItems(actionId);
+  const items = await listActionItems(actionId);
   return { finalAction, counts, items };
 }
 
+/* =========================
+ * MOVE
+ * ========================= */
 export async function performBulkMove(
   payload: BulkMovePayload,
   options: { actionId?: string; userId: string; parentActionId?: string }
-) {
-  const action = createAction({
+): Promise<OperationResult> {
+  const action = await createAction({
     id: options.actionId,
     userId: options.userId,
     type: "MOVE",
@@ -111,7 +112,7 @@ export async function performBulkMove(
     parentActionId: options.parentActionId ?? null,
   });
 
-  const items = createActionItems(
+  const items = await createActionItems(
     payload.items.map((it) => ({
       actionId: action.id,
       type: "MOVE" as ActionType,
@@ -136,12 +137,16 @@ export async function performBulkMove(
 
   if (!client) {
     for (const item of items) {
-      updateActionItem(item.id, {
+      await updateActionItem(item.id, {
         status: "success",
         targetPlaylistItemId: `mock-${item.videoId}`,
       });
     }
-    const { finalAction, counts, items: finalItems } = finalize(action.id);
+    const {
+      finalAction,
+      counts,
+      items: finalItems,
+    } = await finalize(action.id);
     return {
       action: finalAction,
       items: finalItems,
@@ -151,12 +156,11 @@ export async function performBulkMove(
     };
   }
 
-  // === 1) 逐筆「插入目標」→ 成功的才記錄新 ID（嚴格序列化，避免後端鎖衝突） ===
-  const insertedSucceeded: typeof items = [];
+  // 1) 逐筆插入目標
+  const insertedSucceeded: ActionItemRecord[] = [];
   for (const item of items) {
     try {
-      // ★ 實際呼叫前就扣配額（重試會再次扣，符合實際 API 消耗）
-      recordQuota(
+      await recordQuota(
         "playlistItems.insert",
         METHOD_COST["playlistItems.insert"],
         options.userId
@@ -177,14 +181,13 @@ export async function performBulkMove(
         })
       );
       const newId = resp.data.id ?? `mock-${nanoid(8)}`;
-      updateActionItem(item.id, { targetPlaylistItemId: newId });
+      await updateActionItem(item.id, { targetPlaylistItemId: newId });
       insertedSucceeded.push(item);
 
-      // 小間隔，降低後端壓力（再配合重試）
       await new Promise((r) => setTimeout(r, 120));
     } catch (e) {
       const parsed = parseYouTubeError(e);
-      updateActionItem(item.id, {
+      await updateActionItem(item.id, {
         status: "failed",
         errorCode: parsed.code,
         errorMessage: parsed.message,
@@ -196,10 +199,10 @@ export async function performBulkMove(
     }
   }
 
-  // === 2) 逐筆刪「來源項目」，只處理已插入成功者（序列化 + 重試）===
+  // 2) 逐筆刪除來源（只刪有成功插入者）
   for (const item of insertedSucceeded) {
     if (!item.sourcePlaylistItemId) {
-      updateActionItem(item.id, {
+      await updateActionItem(item.id, {
         status: "failed",
         errorCode: "MISSING_SOURCE_ID",
         errorMessage: "Missing source playlist item id",
@@ -207,8 +210,7 @@ export async function performBulkMove(
       continue;
     }
     try {
-      // ★ 刪除前扣配額
-      recordQuota(
+      await recordQuota(
         "playlistItems.delete",
         METHOD_COST["playlistItems.delete"],
         options.userId
@@ -217,12 +219,11 @@ export async function performBulkMove(
       await retryTransient(() =>
         client.playlistItems.delete({ id: item.sourcePlaylistItemId! })
       );
-      updateActionItem(item.id, { status: "success" });
+      await updateActionItem(item.id, { status: "success" });
       await new Promise((r) => setTimeout(r, 80));
     } catch (e) {
       const parsed = parseYouTubeError(e);
-      // 已插入成功但刪除失敗 → 保留 targetPlaylistItemId，標 failed 以便後續 retry
-      updateActionItem(item.id, {
+      await updateActionItem(item.id, {
         status: "failed",
         errorCode: parsed.code || "DELETE_FAILED",
         errorMessage: parsed.message || "Failed to delete source playlist item",
@@ -234,7 +235,7 @@ export async function performBulkMove(
     }
   }
 
-  const { finalAction, counts, items: finalItems } = finalize(action.id);
+  const { finalAction, counts, items: finalItems } = await finalize(action.id);
   return {
     action: finalAction,
     items: finalItems,
@@ -244,33 +245,24 @@ export async function performBulkMove(
   };
 }
 
-// === 新增：批次移除（序列化 + 指數退避重試）===
-// === 取代/更新：批次移除（序列化 + 指數退避重試 + 404 視為成功）===
+/* =========================
+ * REMOVE
+ * ========================= */
 export async function performBulkRemove(
   payload: BulkRemovePayload,
   options: { actionId?: string; userId: string; parentActionId?: string }
-): Promise<{
-  action: ActionRecord;
-  items: ActionItemRecord[];
-  counts: ActionCounts;
-  estimatedQuota: number;
-  usingMock: boolean;
-}> {
-  const action = createAction({
+): Promise<OperationResult> {
+  const action = await createAction({
     id: options.actionId,
     userId: options.userId,
     type: "REMOVE",
-    // 可帶來源清單供追蹤 (前端有傳就記、沒有就 null)
     sourcePlaylistId: (payload as any).sourcePlaylistId ?? null,
     status: "running",
     parentActionId: options.parentActionId ?? null,
   });
 
-  // 1) 先做去重，避免同一 id 重複打 API
-  const uniqueIds = Array.from(new Set(payload.playlistItemIds));
-
-  // 2) 建立 action items
-  const items = createActionItems(
+  const uniqueIds = Array.from(new Set(payload.playlistItemIds ?? []));
+  const items = await createActionItems(
     uniqueIds.map((playlistItemId: string) => ({
       actionId: action.id,
       type: "REMOVE" as ActionType,
@@ -280,7 +272,6 @@ export async function performBulkRemove(
     }))
   );
 
-  // 3) 建立 client
   const client = await (async () => {
     try {
       return await getYouTubeClient(options.userId);
@@ -293,12 +284,15 @@ export async function performBulkRemove(
   const usingMock = !client;
   const estimatedQuota = uniqueIds.length * INSERT_DELETE_QUOTA_COST;
 
-  // 4) 沒 client → 視為成功（mock）
   if (!client) {
     for (const it of items) {
-      updateActionItem(it.id, { status: "success" });
+      await updateActionItem(it.id, { status: "success" });
     }
-    const { finalAction, counts, items: finalItems } = finalize(action.id);
+    const {
+      finalAction,
+      counts,
+      items: finalItems,
+    } = await finalize(action.id);
     return {
       action: finalAction,
       items: finalItems,
@@ -308,17 +302,15 @@ export async function performBulkRemove(
     };
   }
 
-  // 小工具：判斷「已不存在 → 視為成功」
   const isIdempotentNotFound = (code?: string, msg?: string) => {
     const c = (code || "").toLowerCase();
     const m = (msg || "").toLowerCase();
     return c === "playlistitemnotfound" || m.includes("not found");
   };
 
-  // 5) 逐筆序列化刪除 + 重試；404 視為成功
   for (const it of items) {
     if (!it.sourcePlaylistItemId) {
-      updateActionItem(it.id, {
+      await updateActionItem(it.id, {
         status: "failed",
         errorCode: "MISSING_PLAYLIST_ITEM_ID",
         errorMessage: "Missing playlist item identifier",
@@ -327,8 +319,7 @@ export async function performBulkRemove(
     }
 
     try {
-      // ★ 刪除前扣配額
-      recordQuota(
+      await recordQuota(
         "playlistItems.delete",
         METHOD_COST["playlistItems.delete"],
         options.userId
@@ -337,16 +328,13 @@ export async function performBulkRemove(
       await retryTransient(() =>
         client.playlistItems.delete({ id: it.sourcePlaylistItemId! })
       );
-      updateActionItem(it.id, { status: "success" });
+      await updateActionItem(it.id, { status: "success" });
       await new Promise((r) => setTimeout(r, 80));
     } catch (e) {
       const parsed = parseYouTubeError(e);
 
-      // ✅ 這裡是關鍵：404/playlistItemNotFound → 當作早已刪除成功（idempotent success）
       if (isIdempotentNotFound(parsed.code, parsed.message)) {
-        updateActionItem(it.id, {
-          status: "success",
-        });
+        await updateActionItem(it.id, { status: "success" });
         logger.info(
           { itemId: it.id, playlistItemId: it.sourcePlaylistItemId },
           "Remove treated as success (already removed)"
@@ -354,8 +342,7 @@ export async function performBulkRemove(
         continue;
       }
 
-      // 其它錯誤 → 仍標記失敗
-      updateActionItem(it.id, {
+      await updateActionItem(it.id, {
         status: "failed",
         errorCode: parsed.code || "DELETE_FAILED",
         errorMessage: parsed.message || "Failed to delete playlist item",
@@ -364,7 +351,7 @@ export async function performBulkRemove(
     }
   }
 
-  const { finalAction, counts, items: finalItems } = finalize(action.id);
+  const { finalAction, counts, items: finalItems } = await finalize(action.id);
   return {
     action: finalAction,
     items: finalItems,
@@ -374,31 +361,75 @@ export async function performBulkRemove(
   };
 }
 
+/* =========================
+ * ADD
+ * ========================= */
 // === 新增：批次新增到某播放清單（序列化 + 指數退避重試）===
 export async function performBulkAdd(
   payload: BulkAddPayload,
   options: { actionId?: string; userId: string; parentActionId?: string }
 ): Promise<OperationResult> {
-  const action = createAction({
+  // ------- 1) 強韌解析輸入（避免 videoIds 為 undefined） -------
+  const raw = (payload as any) ?? {};
+  let ids: string[] = [];
+
+  if (Array.isArray(raw.videoIds)) {
+    ids = raw.videoIds.filter(
+      (v: unknown): v is string => typeof v === "string" && v.length > 0
+    );
+  } else if (Array.isArray(raw.items)) {
+    // 兼容誤傳 { items: [{ videoId }] }
+    ids = raw.items
+      .map((x: any) => (x ? x.videoId : null))
+      .filter(
+        (v: unknown): v is string => typeof v === "string" && v.length > 0
+      );
+  }
+
+  if (!raw.targetPlaylistId || typeof raw.targetPlaylistId !== "string") {
+    throw new Error("invalid_request: targetPlaylistId missing");
+  }
+  // 若沒任何 id，直接回成功（無事可做）
+  if (ids.length === 0) {
+    const noop = await createAction({
+      id: options.actionId,
+      userId: options.userId,
+      type: "ADD",
+      targetPlaylistId: raw.targetPlaylistId,
+      status: "success",
+      parentActionId: options.parentActionId ?? null,
+    });
+    return {
+      action: noop,
+      items: [],
+      counts: { total: 0, success: 0, failed: 0 },
+      estimatedQuota: 0,
+      usingMock: false,
+    };
+  }
+
+  // ------- 2) 建 action -------
+  const action = await createAction({
     id: options.actionId,
     userId: options.userId,
     type: "ADD",
-    targetPlaylistId: payload.targetPlaylistId,
+    targetPlaylistId: raw.targetPlaylistId,
     status: "running",
     parentActionId: options.parentActionId ?? null,
   });
 
-  // 建立每一筆 action item
-  const items = createActionItems(
-    payload.videoIds.map((videoId) => ({
+  // 去重後建立 items（一定是陣列）
+  ids = Array.from(new Set(ids));
+  const items = await createActionItems(
+    ids.map((videoId) => ({
       actionId: action.id,
       type: "ADD" as ActionType,
       videoId,
-      targetPlaylistId: payload.targetPlaylistId,
+      targetPlaylistId: raw.targetPlaylistId,
     }))
   );
 
-  // 建立 YouTube client
+  // ------- 3) 建 YouTube client -------
   const client = await (async () => {
     try {
       return await getYouTubeClient(options.userId);
@@ -409,17 +440,21 @@ export async function performBulkAdd(
   })();
 
   const usingMock = !client;
-  const estimatedQuota = payload.videoIds.length * INSERT_DELETE_QUOTA_COST;
+  const estimatedQuota = ids.length * INSERT_DELETE_QUOTA_COST;
 
-  // 無 client（mock）→ 視為成功並給 mock id
+  // ------- 4) 無 client（mock）→ 視為成功 -------
   if (!client) {
     for (const it of items) {
-      updateActionItem(it.id, {
+      await updateActionItem(it.id, {
         status: "success",
         targetPlaylistItemId: `mock-${it.videoId}`,
       });
     }
-    const { finalAction, counts, items: finalItems } = finalize(action.id);
+    const {
+      finalAction,
+      counts,
+      items: finalItems,
+    } = await finalize(action.id);
     return {
       action: finalAction,
       items: finalItems,
@@ -429,11 +464,10 @@ export async function performBulkAdd(
     };
   }
 
-  // 有 client → 逐筆序列化 insert + 重試（避免偶發 409/Service Unavailable）
+  // ------- 5) 逐筆 insert + 重試 -------
   for (const it of items) {
     try {
-      // ★ 插入前扣配額
-      recordQuota(
+      await recordQuota(
         "playlistItems.insert",
         METHOD_COST["playlistItems.insert"],
         options.userId
@@ -444,7 +478,7 @@ export async function performBulkAdd(
           part: ["snippet"],
           requestBody: {
             snippet: {
-              playlistId: payload.targetPlaylistId,
+              playlistId: raw.targetPlaylistId,
               resourceId: {
                 kind: "youtube#video",
                 videoId: it.videoId ?? undefined,
@@ -453,16 +487,17 @@ export async function performBulkAdd(
           },
         })
       );
+
       const newId = resp.data.id ?? `mock-${nanoid(8)}`;
-      updateActionItem(it.id, {
+      await updateActionItem(it.id, {
         status: "success",
         targetPlaylistItemId: newId,
       });
-      // 輕微間隔降低後端壓力
+
       await new Promise((r) => setTimeout(r, 100));
     } catch (e) {
       const parsed = parseYouTubeError(e);
-      updateActionItem(it.id, {
+      await updateActionItem(it.id, {
         status: "failed",
         errorCode: parsed.code,
         errorMessage: parsed.message,
@@ -474,7 +509,7 @@ export async function performBulkAdd(
     }
   }
 
-  const { finalAction, counts, items: finalItems } = finalize(action.id);
+  const { finalAction, counts, items: finalItems } = await finalize(action.id);
   return {
     action: finalAction,
     items: finalItems,
@@ -484,15 +519,17 @@ export async function performBulkAdd(
   };
 }
 
-// === 新增：回傳某 action 的摘要（action 本體 + counts + items）===
-export function getActionSummary(actionId: string): {
+/* =========================
+ * Summary
+ * ========================= */
+export async function getActionSummary(actionId: string): Promise<{
   action: ActionRecord;
   counts: ActionCounts;
   items: ActionItemRecord[];
-} | null {
-  const action = getActionById(actionId);
+} | null> {
+  const action = await getActionById(actionId);
   if (!action) return null;
-  const counts = getActionCounts(actionId);
-  const items = listActionItems(actionId);
+  const counts = await getActionCounts(actionId);
+  const items = await listActionItems(actionId);
   return { action, counts, items };
 }

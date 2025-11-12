@@ -1,10 +1,10 @@
-// lib/google.ts
+// lib/google.ts（節錄：改 DB 部分；其餘保留）
 import "server-only";
 import { google } from "googleapis";
 import type { OAuth2Client, Credentials } from "google-auth-library";
 import type { youtube_v3 } from "googleapis";
-import { db } from "./db";
 import { logger } from "./logger";
+import { query } from "@/lib/db";
 
 const {
   GOOGLE_CLIENT_ID = "",
@@ -12,7 +12,6 @@ const {
   GOOGLE_REDIRECT_URI = "http://localhost:3000/api/auth/callback",
 } = process.env;
 
-/** DB row 型別（對應 user_tokens 資料表） */
 export interface StoredTokens {
   user_id: string;
   access_token: string | null;
@@ -36,26 +35,23 @@ function getOAuthClient(): OAuth2Client {
   );
 }
 
-/** 產生 Google OAuth 登入網址（給 /api/auth/login 使用） */
 export function buildAuthUrl(state: string): string | null {
   if (!isGoogleConfigured()) return null;
   const oauth2 = getOAuthClient();
   const scopes = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
-    // 需要寫入動作就用 youtube；只讀可改 youtube.readonly
     "https://www.googleapis.com/auth/youtube",
   ];
   return oauth2.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent", // 需要 refresh_token
+    prompt: "consent",
     include_granted_scopes: true,
     scope: scopes,
     state,
   });
 }
 
-/** 交換 code → tokens */
 export async function exchangeCodeForTokens(
   code: string
 ): Promise<Credentials> {
@@ -64,7 +60,6 @@ export async function exchangeCodeForTokens(
   return tokens;
 }
 
-/** 從 tokens 取 email（當作 userId） */
 export async function getEmailFromTokens(
   tokens: Credentials
 ): Promise<string | null> {
@@ -75,77 +70,66 @@ export async function getEmailFromTokens(
   return me.data.email ?? null;
 }
 
-/** 初始化資料表（若不存在） */
-function ensureTokenTable() {
-  db.prepare(
-    `
+/* ===================== PG 版 Token 存取 ===================== */
+
+async function ensureUserTokensTable() {
+  await query(`
     CREATE TABLE IF NOT EXISTS user_tokens (
-      user_id       TEXT PRIMARY KEY,
+      user_id TEXT PRIMARY KEY,
       access_token  TEXT,
       refresh_token TEXT,
       scope         TEXT,
       token_type    TEXT,
-      expiry_date   INTEGER,
+      expiry_date   BIGINT,
       id_token      TEXT,
-      updated_at    INTEGER
+      updated_at    BIGINT
     )
-  `
-  ).run();
+  `);
 }
 
-/** 儲存使用者 tokens（有則更新；refresh_token 若沒回傳則保留舊值） */
 export async function saveUserTokens(
   userId: string,
   tokens: Credentials
 ): Promise<void> {
-  ensureTokenTable();
-  db.prepare(
-    `
-    INSERT INTO user_tokens (user_id, access_token, refresh_token, scope, token_type, expiry_date, id_token, updated_at)
-    VALUES (@user_id, @access_token, @refresh_token, @scope, @token_type, @expiry_date, @id_token, @updated_at)
-    ON CONFLICT(user_id) DO UPDATE SET
-      access_token  = excluded.access_token,
-      refresh_token = COALESCE(excluded.refresh_token, user_tokens.refresh_token),
-      scope         = excluded.scope,
-      token_type    = excluded.token_type,
-      expiry_date   = excluded.expiry_date,
-      id_token      = excluded.id_token,
-      updated_at    = excluded.updated_at
-  `
-  ).run({
-    user_id: userId,
-    access_token: tokens.access_token ?? null,
-    refresh_token: tokens.refresh_token ?? null,
-    scope: tokens.scope ?? null,
-    token_type: tokens.token_type ?? null,
-    expiry_date: tokens.expiry_date ?? null,
-    id_token: tokens.id_token ?? null,
-    updated_at: Date.now(),
-  });
+  await ensureUserTokensTable();
+  await query(
+    `INSERT INTO user_tokens (user_id, access_token, refresh_token, scope, token_type, expiry_date, id_token, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (user_id) DO UPDATE SET
+       access_token  = EXCLUDED.access_token,
+       refresh_token = COALESCE(EXCLUDED.refresh_token, user_tokens.refresh_token),
+       scope         = EXCLUDED.scope,
+       token_type    = EXCLUDED.token_type,
+       expiry_date   = EXCLUDED.expiry_date,
+       id_token      = EXCLUDED.id_token,
+       updated_at    = EXCLUDED.updated_at`,
+    [
+      userId,
+      tokens.access_token ?? null,
+      tokens.refresh_token ?? null,
+      tokens.scope ?? null,
+      tokens.token_type ?? null,
+      tokens.expiry_date ?? null,
+      tokens.id_token ?? null,
+      Date.now(),
+    ]
+  );
 }
 
-/** 讀回使用者 tokens；不存在回 null */
 export async function getUserTokens(
   userId: string
 ): Promise<StoredTokens | null> {
-  ensureTokenTable();
-  const row = db
-    .prepare(`SELECT * FROM user_tokens WHERE user_id = ?`)
-    .get(userId) as StoredTokens | undefined;
-  return row ?? null;
+  await ensureUserTokensTable();
+  const { rows } = await query<StoredTokens>(
+    `SELECT user_id, access_token, refresh_token, scope, token_type, expiry_date, id_token, updated_at
+     FROM user_tokens WHERE user_id = $1`,
+    [userId]
+  );
+  return rows[0] ?? null;
 }
 
-/* =========================================================
- *   YouTube Client 取得：提供「一般」與「嚴格」兩種介面
- * ========================================================= */
+/* ===================== YouTube Client ===================== */
 
-/**
- * 延伸版（推薦在 API 端使用）：
- * - 有 token 時：回 { yt, mock: false }
- * - 無 token 時：
- *   - requireReal=true → throw { code: "NO_TOKENS" }
- *   - requireReal=false → 回 { yt: null, mock: true } 並警告 log（方便在列表讀取等非關鍵流程 fallback）
- */
 export async function getYouTubeClientEx(opts: {
   userId: string;
   requireReal?: boolean;
@@ -174,7 +158,6 @@ export async function getYouTubeClientEx(opts: {
       expiry_date: row.expiry_date ?? undefined,
     });
 
-    // 自動刷新 → 寫回 DB
     oauth2.on("tokens", async (t) => {
       try {
         const merged: Credentials = {
@@ -194,23 +177,16 @@ export async function getYouTubeClientEx(opts: {
     const yt = google.youtube({ version: "v3", auth: oauth2 });
     return { yt, mock: false };
   } catch (err: any) {
-    // 嚴格模式下的錯誤直接往上丟；一般模式回 mock
     if (err?.code === "NO_TOKENS") throw err;
-
     logger.error(
       { err, userId: opts.userId },
       "getYouTubeClient failed; falling back to mock"
     );
-    if (opts.requireReal) throw err; // 嚴格模式不要 fallback
+    if (opts.requireReal) throw err;
     return { yt: null, mock: true };
   }
 }
 
-/**
- * 相容舊介面（保持你現有程式不爆）：
- * - 有 token：回 youtube client
- * - 無 token：回 null（等同以前的行為）
- */
 export async function getYouTubeClient(
   userId: string
 ): Promise<youtube_v3.Youtube | null> {

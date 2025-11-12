@@ -1,4 +1,3 @@
-// /app/api/bulk/move/route.ts
 import type { NextRequest } from "next/server";
 import { jsonError, jsonOk } from "@/lib/result";
 import { bulkMoveSchema } from "@/validators/bulk";
@@ -6,11 +5,11 @@ import { performBulkMove, getActionSummary } from "@/lib/actions-service";
 import { checkIdempotencyKey, registerIdempotencyKey } from "@/lib/idempotency";
 import { requireUserId } from "@/lib/auth";
 import { getYouTubeClientEx } from "@/lib/google";
+import { withTransaction } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  // 1) 讀 body
   let body: unknown;
   try {
     body = await request.json();
@@ -24,15 +23,12 @@ export async function POST(request: NextRequest) {
   }
   const payload = parsed.data;
 
-  // 2) 讀 session
   const auth = await requireUserId(request);
   if (!auth) {
-    console.log("[bulk/move] no session, cookies=", request.cookies.getAll());
     return jsonError("unauthorized", "Sign in to continue", { status: 401 });
   }
   const userId = auth.userId;
 
-  // 3) 確認 token 存在
   try {
     const { yt, mock } = await getYouTubeClientEx({
       userId,
@@ -53,31 +49,31 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // 4) 冪等鍵
   const idempotencyKey =
     request.headers.get("idempotency-key") ??
     payload.idempotencyKey ??
     undefined;
 
-  if (idempotencyKey && checkIdempotencyKey(idempotencyKey)) {
-    const summary = getActionSummary(idempotencyKey);
+  if (idempotencyKey && (await checkIdempotencyKey(idempotencyKey))) {
+    const summary = await getActionSummary(idempotencyKey); // ⬅️ await
     if (summary && summary.action.userId === userId) {
       return jsonOk({
         ...summary,
-        // 顯示用估算（delete 50 + insert 50）
-        estimatedQuota: payload.items.length * 100,
+        estimatedQuota: (payload.items?.length ?? 0) * 100,
         idempotent: true,
       });
     }
   }
 
-  // 5) 執行（精準配額由 performBulkMove 內部以 withQuota 記錄）
-  const result = await performBulkMove(payload, {
-    userId,
-    actionId: idempotencyKey,
+  const result = await withTransaction(async (client) => {
+    return performBulkMove(payload, {
+      userId,
+      actionId: idempotencyKey,
+      pgClient: client,
+    } as any);
   });
 
-  if (idempotencyKey) registerIdempotencyKey(idempotencyKey);
+  if (idempotencyKey) await registerIdempotencyKey(idempotencyKey);
 
   return jsonOk({ ...result, idempotent: false });
 }

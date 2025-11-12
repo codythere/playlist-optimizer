@@ -1,47 +1,44 @@
-// lib/db.ts
-import DatabaseConstructor from "better-sqlite3";
-import type { Database as BetterSqlite3Database } from "better-sqlite3";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import path, { dirname, join } from "node:path";
-import { logger } from "./logger";
+// lib/db.ts (Postgres 版)
+import { Pool, PoolClient } from "pg";
 
-export const DB_PATH =
-  process.env.SQLITE_DB_PATH ?? join(process.cwd(), "db", "data.sqlite3");
+let _pool: Pool | null = null;
 
-function ensureDirectory(pathStr: string) {
-  const dir = dirname(pathStr);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+export function getPool() {
+  if (!_pool) {
+    _pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+      ssl:
+        process.env.NODE_ENV === "production"
+          ? { rejectUnauthorized: false }
+          : false,
+    });
   }
+  return _pool;
 }
 
-function applySchema(db: BetterSqlite3Database) {
-  const schemaPath = join(process.cwd(), "db", "schema.sql");
-  if (!existsSync(schemaPath)) {
-    logger.warn(
-      { schemaPath },
-      "SQLite schema file missing; skipping migration"
-    );
-    return;
+export async function query<T = any>(text: string, params?: any[]) {
+  const pool = getPool();
+  const res = await pool.query<T>(text, params);
+  return res; // 使用 res.rows
+}
+
+export async function withTransaction<T>(
+  fn: (client: PoolClient) => Promise<T>
+) {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
   }
-  const schema = readFileSync(schemaPath, "utf8");
-  db.exec(schema);
-}
-
-function createConnection() {
-  ensureDirectory(DB_PATH);
-  const connection = new DatabaseConstructor(DB_PATH);
-  connection.pragma("journal_mode = WAL");
-  connection.pragma("foreign_keys = ON");
-  applySchema(connection);
-  return connection;
-}
-
-export const db = createConnection();
-
-export type Db = BetterSqlite3Database;
-
-// 🧭 偵錯：印出實際 DB 路徑
-if (process.env.NODE_ENV !== "production") {
-  console.log("[db] Using SQLite at:", path.resolve(DB_PATH));
 }

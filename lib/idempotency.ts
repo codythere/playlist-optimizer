@@ -1,38 +1,49 @@
-import { db } from "./db";
+// lib/idempotency.ts (Postgres 版)
+import { query } from "@/lib/db";
 
-const insertKey = db.prepare("INSERT OR IGNORE INTO idempotency_keys (key, created_at) VALUES (?, CURRENT_TIMESTAMP)");
-const selectKey = db.prepare("SELECT key FROM idempotency_keys WHERE key = ?");
-
-export function checkIdempotencyKey(key: string) {
-  const row = selectKey.get(key) as { key: string } | undefined;
-  return Boolean(row);
+async function ensureTable() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      key TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ DEFAULT now()
+    )
+  `);
 }
 
-export function registerIdempotencyKey(key: string) {
-  const info = insertKey.run(key);
-  return info.changes === 0;
+export async function checkIdempotencyKey(key: string) {
+  await ensureTable();
+  const { rows } = await query<{ exists: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM idempotency_keys WHERE key = $1) AS exists`,
+    [key]
+  );
+  return Boolean(rows[0]?.exists);
 }
 
-export async function withIdempotency<T>(key: string | undefined | null, handler: () => Promise<T>) {
+export async function registerIdempotencyKey(key: string) {
+  await ensureTable();
+  // true = 已存在；false = 本次新註冊成功
+  const res = await query(
+    `INSERT INTO idempotency_keys(key, created_at)
+     VALUES ($1, now())
+     ON CONFLICT (key) DO NOTHING`,
+    [key]
+  );
+  // rowCount=0 代表已存在
+  return res.rowCount === 0;
+}
+
+export async function withIdempotency<T>(
+  key: string | undefined | null,
+  handler: () => Promise<T>
+) {
   if (!key) {
-    return {
-      alreadyExisted: false,
-      result: await handler(),
-    };
+    return { alreadyExisted: false, result: await handler() };
   }
-
-  const already = checkIdempotencyKey(key);
+  const already = await checkIdempotencyKey(key);
   if (already) {
-    return {
-      alreadyExisted: true,
-      result: undefined as T | undefined,
-    };
+    return { alreadyExisted: true, result: undefined as T | undefined };
   }
-
   const result = await handler();
-  registerIdempotencyKey(key);
-  return {
-    alreadyExisted: false,
-    result,
-  };
+  await registerIdempotencyKey(key);
+  return { alreadyExisted: false, result };
 }

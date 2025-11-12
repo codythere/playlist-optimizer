@@ -5,6 +5,11 @@ import { getTodayQuota } from "@/lib/quota";
 
 export const dynamic = "force-dynamic";
 
+function toNum(v: unknown, fallback = 0): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export async function GET() {
   try {
     const jar = await cookies();
@@ -13,28 +18,30 @@ export async function GET() {
       ? (JSON.parse(raw).userId as string | undefined)
       : undefined;
 
-    if (!userId) {
-      // 未登入：仍回 budget，used = 0（方便前端顯示 UI）
-      const { budget, resetAtISO } = getTodayQuota("guest");
-      return NextResponse.json({
-        ok: true,
-        data: {
-          todayUsed: 0,
-          todayRemaining: budget,
-          todayBudget: budget,
-          resetAtISO,
-        },
-      });
-    }
+    const q = await getTodayQuota(userId ?? "guest");
+    // 把任何可能是 Number 物件 / Decimal / Big 的東西，統一轉成原生 number
+    const budget = toNum((q as any)?.budget, 10000);
+    const used = toNum((q as any)?.used, 0);
 
-    const q = getTodayQuota(userId);
+    // remain 若上游沒給或不是 number，就自己算
+    const remainRaw = (q as any)?.remain;
+    const remain = Number.isFinite(Number(remainRaw))
+      ? Number(remainRaw)
+      : Math.max(0, budget - used);
+
+    // resetAtISO 統一成字串
+    const resetAtISO =
+      typeof (q as any)?.resetAtISO === "string"
+        ? (q as any).resetAtISO
+        : new Date().toISOString();
+
     return NextResponse.json({
       ok: true,
       data: {
-        todayUsed: q.used,
-        todayRemaining: q.remain,
-        todayBudget: q.budget,
-        resetAtISO: q.resetAtISO,
+        todayUsed: used,
+        todayRemaining: remain,
+        todayBudget: budget,
+        resetAtISO,
       },
     });
   } catch (e: any) {

@@ -1,4 +1,3 @@
-// /app/api/bulk/remove/route.ts
 import type { NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { jsonError, jsonOk } from "@/lib/result";
@@ -8,6 +7,7 @@ import { checkIdempotencyKey, registerIdempotencyKey } from "@/lib/idempotency";
 import { requireUserId } from "@/lib/auth";
 import { getUserTokens } from "@/lib/google";
 import { logger } from "@/lib/logger";
+import { withTransaction } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +30,6 @@ async function getUserIdFromRequest(req: NextRequest): Promise<string | null> {
 }
 
 export async function POST(request: NextRequest) {
-  // 1) 讀 body
   let body: unknown;
   try {
     body = await request.json();
@@ -44,13 +43,11 @@ export async function POST(request: NextRequest) {
   }
   const payload = parsed.data;
 
-  // 2) 解析 userId
   const userId = await getUserIdFromRequest(request);
   if (!userId) {
     return jsonError("unauthorized", "Sign in to continue", { status: 401 });
   }
 
-  // 3) 確認 token 存在
   const tokens = await getUserTokens(userId);
   if (!tokens || (!tokens.access_token && !tokens.refresh_token)) {
     logger.warn({ userId }, "[bulk/remove] no tokens");
@@ -61,31 +58,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 4) 冪等鍵
   const idemKey =
     request.headers.get("idempotency-key") ??
     payload.idempotencyKey ??
     undefined;
 
-  if (idemKey && checkIdempotencyKey(idemKey)) {
-    const summary = getActionSummary(idemKey);
+  if (idemKey && (await checkIdempotencyKey(idemKey))) {
+    const summary = await getActionSummary(idemKey); // ⬅️ await
     if (summary && summary.action.userId === userId) {
       return jsonOk({
         ...summary,
-        // 顯示用估算（delete 50/部）
-        estimatedQuota: payload.playlistItemIds.length * 50,
+        estimatedQuota: (payload.playlistItemIds?.length ?? 0) * 50,
         idempotent: true,
       });
     }
   }
 
-  // 5) 執行（精準配額由 performBulkRemove 內部以 withQuota 記錄）
-  const result = await performBulkRemove(payload, {
-    userId,
-    actionId: idemKey,
+  const result = await withTransaction(async (client) => {
+    return performBulkRemove(payload, {
+      userId,
+      actionId: idemKey,
+      pgClient: client,
+    } as any);
   });
 
-  if (idemKey) registerIdempotencyKey(idemKey);
+  if (idemKey) await registerIdempotencyKey(idemKey);
 
   return jsonOk({ ...result, idempotent: false });
 }

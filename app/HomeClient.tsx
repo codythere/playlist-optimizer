@@ -10,7 +10,7 @@ import {
 } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PlaylistSummary, PlaylistItemSummary } from "@/types/youtube";
-import type { OperationResult } from "@/lib/actions-service";
+// import type { OperationResult } from "@/lib/actions-service"; // ❌ 不再使用
 import { cn } from "@/lib/utils";
 
 import { PlaylistList } from "@/app/components/PlaylistList";
@@ -68,6 +68,27 @@ interface PlaylistItemsPayload {
   nextPageToken?: string | null;
   usingMock: boolean;
 }
+
+/* ========= 前端最小回傳型別（取代 OperationResult） ========= */
+type CreatedItem = {
+  playlistItemId?: string | null;
+  videoId?: string | null;
+};
+
+type MovedItem = {
+  from?: { playlistItemId?: string | null } | null;
+  to?: { playlistItemId?: string | null } | null;
+  videoId?: string | null;
+};
+
+type AddApiResult = {
+  created?: CreatedItem[];
+};
+
+type MoveApiResult = {
+  moved?: MovedItem[];
+};
+/* ======================================================== */
 
 function extractThumbnailUrl(th: ThumbnailMap | null) {
   return th?.medium?.url ?? th?.high?.url ?? th?.default?.url ?? null;
@@ -445,19 +466,27 @@ export default function HomeClient() {
     label: string;
   }>({ status: "idle", label: "" });
 
-  /* ---- ✅ Undo：狀態與工具 ---- */
+  /* ---- ✅ Undo：狀態與工具（改成精準 playlistItemId） ---- */
   type LastOp =
-    | { type: "add"; targetPlaylistId: string; videoIds: string[] }
-    | { type: "remove"; sourcePlaylistId: string; videoIds: string[] }
+    | {
+        type: "add";
+        targetPlaylistId: string;
+        created: Array<{ playlistItemId: string; videoId: string | null }>;
+      }
+    | {
+        type: "remove";
+        sourcePlaylistId: string;
+        videoIds: string[]; // 移除只拿得到 videoId，復原用 add
+      }
     | {
         type: "move";
         sourcePlaylistId: string;
         targetPlaylistId: string;
-        videoIds: string[];
+        toItems: Array<{ playlistItemId: string; videoId: string }>; // 目標端新生 id
       };
   const [lastOp, setLastOp] = React.useState<LastOp | null>(null);
 
-  // 取代原本的 findItemIdsByVideoIds，改名並回傳 pair
+  // 仍保留：必要時可用 videoId 搜索（做為後備）
   async function findItemsInPlaylistByVideoIds(
     playlistId: string,
     videoIds: string[]
@@ -621,7 +650,7 @@ export default function HomeClient() {
       videoIds: string[];
       idempotencyKey?: string;
     }) =>
-      apiRequest<OperationResult>("/api/bulk/add", {
+      apiRequest<AddApiResult>("/api/bulk/add", {
         method: "POST",
         body: JSON.stringify(payload),
       }),
@@ -683,13 +712,22 @@ export default function HomeClient() {
       }
     },
 
-    onSuccess: (_res, variables) => {
+    // ✅ 這裡改成：保存 created 的「真實 playlistItemId」
+    onSuccess: (res: AddApiResult, variables) => {
       setActionToast({ status: "success", label: "新增到播放清單" });
+
+      const created: Array<{ playlistItemId: string; videoId: string | null }> =
+        (res.created ?? [])
+          .map((c: CreatedItem) => ({
+            playlistItemId: String(c.playlistItemId ?? ""),
+            videoId: c.videoId ?? null,
+          }))
+          .filter((x) => x.playlistItemId !== "");
 
       setLastOp({
         type: "add",
         targetPlaylistId: variables.targetPlaylistId,
-        videoIds: variables.videoIds,
+        created,
       });
 
       startTransition(() => {
@@ -702,6 +740,9 @@ export default function HomeClient() {
       await queryClient.invalidateQueries({
         queryKey: ["playlist-items", variables.targetPlaylistId],
       });
+      // ✅ 立刻刷新配額
+      await queryClient.invalidateQueries({ queryKey: ["quota"] });
+
       await new Promise((r) => setTimeout(r, 200));
       await queryClient.refetchQueries({
         queryKey: ["playlist-items", variables.targetPlaylistId],
@@ -716,7 +757,7 @@ export default function HomeClient() {
       sourcePlaylistId: string;
       idempotencyKey?: string;
     }) =>
-      apiRequest<OperationResult>("/api/bulk/remove", {
+      apiRequest<unknown>("/api/bulk/remove", {
         method: "POST",
         body: JSON.stringify(payload),
       }),
@@ -755,6 +796,7 @@ export default function HomeClient() {
       setActionToast({ status: "error", label: "從清單移除" });
     },
 
+    // ✅ 移除的 Undo 仍用 videoIds（只能重新 add 回來）
     onSuccess: (_res, _vars, ctx) => {
       setActionToast({ status: "success", label: "從清單移除" });
       const vids = (ctx?.backupRemoved ?? []).map((i) => i.videoId);
@@ -772,6 +814,9 @@ export default function HomeClient() {
       await queryClient.invalidateQueries({
         queryKey: ["playlist-items", variables.sourcePlaylistId],
       });
+      // ✅ 立刻刷新配額
+      await queryClient.invalidateQueries({ queryKey: ["quota"] });
+
       await new Promise((r) => setTimeout(r, 200));
       await queryClient.refetchQueries({
         queryKey: ["playlist-items", variables.sourcePlaylistId],
@@ -787,7 +832,7 @@ export default function HomeClient() {
       items: Array<{ playlistItemId: string; videoId: string }>;
       idempotencyKey?: string;
     }) =>
-      apiRequest<OperationResult>("/api/bulk/move", {
+      apiRequest<MoveApiResult>("/api/bulk/move", {
         method: "POST",
         body: JSON.stringify(payload),
       }),
@@ -870,15 +915,25 @@ export default function HomeClient() {
       setActionToast({ status: "error", label: "一併移轉" });
     },
 
-    onSuccess: (_res, vars, ctx) => {
+    // ✅ 保存 moved.to 的「真實 playlistItemId」，Undo 直接用這些 id 搬回
+    onSuccess: (res: MoveApiResult, vars) => {
       setActionToast({ status: "success", label: "一併移轉" });
-      const vids = (ctx?.backupSourceItems ?? []).map((i) => i.videoId);
-      if (vids.length) {
+
+      const toItems: Array<{ playlistItemId: string; videoId: string }> = (
+        res.moved ?? []
+      )
+        .filter((m: MovedItem) => Boolean(m?.to?.playlistItemId && m?.videoId))
+        .map((m: MovedItem) => ({
+          playlistItemId: String(m.to!.playlistItemId),
+          videoId: String(m.videoId),
+        }));
+
+      if (toItems.length) {
         setLastOp({
           type: "move",
           sourcePlaylistId: vars.sourcePlaylistId,
           targetPlaylistId: vars.targetPlaylistId,
-          videoIds: vids,
+          toItems,
         });
       }
     },
@@ -893,6 +948,9 @@ export default function HomeClient() {
           queryKey: ["playlist-items", targetPlaylistId],
         }),
       ]);
+      // ✅ 立刻刷新配額
+      await queryClient.invalidateQueries({ queryKey: ["quota"] });
+
       await new Promise((r) => setTimeout(r, 150));
       await Promise.all([
         queryClient.refetchQueries({
@@ -1089,11 +1147,11 @@ export default function HomeClient() {
       title = "復原：新增";
       message = (
         <>
-          確認復原「新增」，將 <b>{lastOp.videoIds.length}</b>{" "}
+          確認復原「新增」，將 <b>{lastOp.created.length}</b>{" "}
           部影片自目標清單移除？
         </>
       );
-      units = lastOp.videoIds.length * 50; // delete
+      units = lastOp.created.length * 50; // delete
     } else if (lastOp.type === "remove") {
       title = "復原：移除";
       message = (
@@ -1107,11 +1165,11 @@ export default function HomeClient() {
       title = "復原：一併移轉";
       message = (
         <>
-          確認復原「一併移轉」，將 <b>{lastOp.videoIds.length}</b>{" "}
+          確認復原「一併移轉」，將 <b>{lastOp.toItems.length}</b>{" "}
           部影片搬回原清單？
         </>
       );
-      units = lastOp.videoIds.length * 100; // delete + insert
+      units = lastOp.toItems.length * 100; // delete + insert
     }
 
     const ok = await confirm({
@@ -1136,14 +1194,10 @@ export default function HomeClient() {
 
     try {
       if (lastOp.type === "add") {
-        const pairs = await findItemsInPlaylistByVideoIds(
-          lastOp.targetPlaylistId,
-          lastOp.videoIds
-        );
-        const ids = pairs.map((p) => p.playlistItemId);
-
+        // ✅ 直接用 created 的「真實 playlistItemId」移除
+        const ids = lastOp.created.map((p) => p.playlistItemId);
         if (ids.length) {
-          await apiRequest<OperationResult>("/api/bulk/remove", {
+          await apiRequest<unknown>("/api/bulk/remove", {
             method: "POST",
             body: JSON.stringify({
               sourcePlaylistId: lastOp.targetPlaylistId,
@@ -1168,7 +1222,9 @@ export default function HomeClient() {
         });
 
         await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+        await queryClient.invalidateQueries({ queryKey: ["quota"] });
       } else if (lastOp.type === "remove") {
+        // ✅ 跟原本一樣，用 videoIds 加回
         const optimisticBackItems: PlaylistItemSummary[] = lastOp.videoIds.map(
           (vid) => ({
             playlistItemId: `temp-${vid}`,
@@ -1186,7 +1242,7 @@ export default function HomeClient() {
         );
 
         try {
-          await apiRequest<OperationResult>("/api/bulk/add", {
+          await apiRequest<AddApiResult>("/api/bulk/add", {
             method: "POST",
             body: JSON.stringify({
               targetPlaylistId: lastOp.sourcePlaylistId,
@@ -1224,13 +1280,16 @@ export default function HomeClient() {
         );
 
         await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+        await queryClient.invalidateQueries({ queryKey: ["quota"] });
       } else if (lastOp.type === "move") {
-        const pairs = await findItemsInPlaylistByVideoIds(
-          lastOp.targetPlaylistId,
-          lastOp.videoIds
-        );
+        // ✅ 直接用 moved.to 的「真實 playlistItemId」把它們搬回
+        const pairs = lastOp.toItems.map((x) => ({
+          playlistItemId: x.playlistItemId,
+          videoId: x.videoId,
+        }));
+
         if (pairs.length) {
-          await apiRequest<OperationResult>("/api/bulk/move", {
+          await apiRequest<MoveApiResult>("/api/bulk/move", {
             method: "POST",
             body: JSON.stringify({
               sourcePlaylistId: lastOp.targetPlaylistId,
@@ -1273,6 +1332,7 @@ export default function HomeClient() {
         ]);
 
         await queryClient.invalidateQueries({ queryKey: ["playlists"] });
+        await queryClient.invalidateQueries({ queryKey: ["quota"] });
       }
 
       setActionToast({ status: "success", label: "復原" });
@@ -1305,6 +1365,9 @@ export default function HomeClient() {
 
       // 廣播事件，讓其它地方（如果有）也能同步
       window.dispatchEvent(new Event("ytpm:auth-changed"));
+
+      // ✅ 清掉 quota 相關快取
+      queryClient.removeQueries({ queryKey: ["quota"] });
 
       queryClient.invalidateQueries({ queryKey: ["auth"] });
       queryClient.invalidateQueries({ queryKey: ["playlists"] });
