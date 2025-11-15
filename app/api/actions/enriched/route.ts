@@ -9,6 +9,7 @@ import {
 } from "@/lib/actions-store";
 import { getYouTubeClientEx } from "@/lib/google";
 import type { youtube_v3 } from "googleapis";
+import type { ActionRecord } from "@/types/actions";
 
 // --- helpers ---
 const DEFAULT_LIMIT = 10;
@@ -138,7 +139,7 @@ export async function GET(request: NextRequest) {
 
     // 5) 組回應
     return jsonOk({
-      actions: page.map((a) => ({
+      actions: page.map((a: ActionRecord) => ({
         action: a,
         counts: countsByAction[a.id] ?? { total: 0, success: 0, failed: 0 },
       })),
