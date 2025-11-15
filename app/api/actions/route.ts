@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { requireUserId } from "@/lib/auth";
 import { listActionsPageSafe, getActionCounts } from "@/lib/actions-store";
 import { jsonOk, jsonError } from "@/lib/result";
+import type { ActionRecord } from "@/types/actions"; // ✅ 新增這行
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,7 +16,6 @@ export async function GET(request: NextRequest) {
     );
     const cursor = url.searchParams.get("cursor") || undefined;
 
-    // ✅ 明確記錄
     console.log(
       "[/api/actions] using listActionsPageSafe; limit, cursor =",
       limit,
@@ -27,14 +27,18 @@ export async function GET(request: NextRequest) {
       return jsonError("unauthorized", "Sign in to continue", { status: 401 });
     }
 
-    // ✅ 用安全版（普通 ? 佔位）
-    const actions = await listActionsPageSafe(auth.userId, limit + 1, cursor);
+    // ✅ 型別明確：ActionRecord[]
+    const actions: ActionRecord[] = await listActionsPageSafe(
+      auth.userId,
+      limit + 1,
+      cursor
+    );
     const hasMore = actions.length > limit;
-    const page = hasMore ? actions.slice(0, limit) : actions;
+    const page: ActionRecord[] = hasMore ? actions.slice(0, limit) : actions;
 
-    // 相容未來非同步
+    // ✅ 把 action 標成 ActionRecord，避免隱含 any
     const data = await Promise.all(
-      page.map(async (action) => ({
+      page.map(async (action: ActionRecord) => ({
         action,
         counts: await getActionCounts(action.id),
       }))
