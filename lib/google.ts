@@ -6,11 +6,14 @@ import type { youtube_v3 } from "googleapis";
 import { logger } from "./logger";
 import { query } from "@/lib/db";
 
-const {
-  GOOGLE_CLIENT_ID = "",
-  GOOGLE_CLIENT_SECRET = "",
-  GOOGLE_REDIRECT_URI = "http://localhost:3000/api/auth/callback",
-} = process.env;
+const APP_BASE_URL = process.env.APP_BASE_URL ?? "http://localhost:3000";
+
+const { GOOGLE_CLIENT_ID = "", GOOGLE_CLIENT_SECRET = "" } = process.env;
+
+// 用 APP_BASE_URL 自動組出 redirect URI
+const GOOGLE_REDIRECT_URI =
+  process.env.GOOGLE_REDIRECT_URI ??
+  `${APP_BASE_URL.replace(/\/$/, "")}/api/auth/callback`;
 
 export interface StoredTokens {
   user_id: string;
