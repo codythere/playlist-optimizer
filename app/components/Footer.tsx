@@ -14,7 +14,7 @@ export function Footer() {
       className="mt-10 border-t px-4 py-6 text-xs text-muted-foreground"
     >
       <div className="mx-auto max-w-screen-xl space-y-4 leading-relaxed">
-        {/* 安全說明文字 */}
+        {/* 安全說明文字（建議保留，簡短說明行為） */}
         <div className="space-y-1">
           <p>
             - 本工具僅在使用者登入期間使用其帳號授權操作，不會將 YouTube Data
@@ -26,23 +26,44 @@ export function Footer() {
           </p>
           <p>
             - 當配額不足（<code>quotaExceeded</code>
-            ）時，明確告知使用者並暫停對應功能。
+            ）時，會明確告知使用者並暫停對應功能。
           </p>
         </div>
 
-        {/* GitHub / Version Info */}
-        <div className="flex items-center justify-between pt-4 border-t text-[11px] text-muted-foreground">
-          <div>YT Playlist Manager · v{version}</div>
+        {/* 法務／隱私連結 */}
+        <div className="flex flex-wrap items-center gap-3 pt-3 border-t text-[11px]">
+          <span className="text-muted-foreground">
+            {/* 這裡的名稱建議未來改成不含「YT」的正式產品名 */}
+            YT Playlist Manager · v{version}
+          </span>
+          <span>·</span>
+          <div className="flex flex-wrap items-center gap-3">
+            <Link
+              href="/privacy"
+              className="hover:text-foreground underline-offset-2 "
+            >
+              Privacy Policy
+            </Link>
+            <span>·</span>
+            <Link
+              href="/terms"
+              className="hover:text-foreground underline-offset-2 "
+            >
+              Terms of Use
+            </Link>
+          </div>
 
-          <Link
-            href="https://github.com/codythere/yt-playlist-manager"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
-          >
-            <Github className="h-3.5 w-3.5" />
-            GitHub
-          </Link>
+          <div className="ml-auto">
+            <Link
+              href="https://github.com/codythere/yt-playlist-manager"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+            >
+              <Github className="h-3.5 w-3.5" />
+              GitHub
+            </Link>
+          </div>
         </div>
       </div>
     </footer>
