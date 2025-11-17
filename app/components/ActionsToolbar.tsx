@@ -58,6 +58,7 @@ export interface ActionsToolbarProps {
   addLoading?: boolean;
   removeLoading?: boolean;
   moveLoading?: boolean;
+  undoLoading?: boolean;
 
   /** ✅ 是否可復原（控制 Undo 按鈕啟用） */
   canUndo?: boolean;
@@ -88,6 +89,7 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
   const addBusy = Boolean(props.addLoading) || busyAll;
   const removeBusy = Boolean(props.removeLoading) || busyAll;
   const moveBusy = Boolean(props.moveLoading) || busyAll;
+  const undoBusy = Boolean(props.undoLoading) || busyAll;
 
   const nothingSelected = selectedCount === 0;
 
@@ -276,12 +278,21 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
           size="sm"
           variant="ghost"
           onClick={props.onUndo}
-          disabled={busyAll || !props.canUndo}
-          aria-disabled={busyAll || !props.canUndo}
+          disabled={undoBusy || !props.canUndo}
+          aria-disabled={undoBusy || !props.canUndo}
           title={props.canUndo ? "復原上一個動作" : "暫無可復原的動作"}
         >
-          <Undo2 className="mr-2 h-4 w-4" />
-          復原
+          {undoBusy ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              復原中…
+            </>
+          ) : (
+            <>
+              <Undo2 className="mr-2 h-4 w-4" />
+              復原
+            </>
+          )}
         </Button>
       </div>
     </div>

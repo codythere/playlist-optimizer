@@ -485,6 +485,7 @@ export default function HomeClient() {
         toItems: Array<{ playlistItemId: string; videoId: string }>; // 目標端新生 id
       };
   const [lastOp, setLastOp] = React.useState<LastOp | null>(null);
+  const [undoLoading, setUndoLoading] = React.useState(false);
 
   // 仍保留：必要時可用 videoId 搜索（做為後備）
   async function findItemsInPlaylistByVideoIds(
@@ -1188,6 +1189,8 @@ export default function HomeClient() {
     });
     if (!ok) return;
 
+    // 🔹 開始 Undo Loading
+    setUndoLoading(true);
     setActionToast({ status: "loading", label: "復原" });
 
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1340,6 +1343,8 @@ export default function HomeClient() {
     } catch (_err) {
       setActionToast({ status: "error", label: "復原" });
     } finally {
+      // 🔹 結束 Undo Loading
+      setUndoLoading(false);
       setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
     }
   };
@@ -1555,6 +1560,7 @@ export default function HomeClient() {
               addLoading={addMutation.isPending}
               removeLoading={removeMutation.isPending}
               moveLoading={moveMutation.isPending}
+              undoLoading={undoLoading}
               canUndo={Boolean(lastOp)}
               todayRemaining={todayRemaining}
               todayBudget={todayBudget}
