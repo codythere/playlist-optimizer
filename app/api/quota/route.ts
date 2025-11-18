@@ -18,7 +18,9 @@ export async function GET() {
       ? (JSON.parse(raw).userId as string | undefined)
       : undefined;
 
-    const q = await getTodayQuota(userId ?? "guest");
+    // ✅ 用真正的 userId（或 undefined），不要硬塞 "guest"
+    const q = await getTodayQuota(userId);
+
     // 把任何可能是 Number 物件 / Decimal / Big 的東西，統一轉成原生 number
     const budget = toNum((q as any)?.budget, 10000);
     const used = toNum((q as any)?.used, 0);
@@ -42,12 +44,16 @@ export async function GET() {
         todayRemaining: remain,
         todayBudget: budget,
         resetAtISO,
+        // 若你之後前端想用也可以拿 q.mode / q.globalUsed / q.userUsed
+        // quotaMode: (q as any)?.mode,
+        // todayGlobalUsed: toNum((q as any)?.globalUsed, 0),
+        // todayUserUsed: toNum((q as any)?.userUsed, 0),
       },
     });
   } catch (e: any) {
     return NextResponse.json(
       {
-        ok: false,
+        ok: true,
         error: { code: "internal_error", message: e?.message ?? "failed" },
       },
       { status: 500 }
