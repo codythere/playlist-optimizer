@@ -486,6 +486,9 @@ export default function HomeClient() {
       };
   const [lastOp, setLastOp] = React.useState<LastOp | null>(null);
   const [undoLoading, setUndoLoading] = React.useState(false);
+  const [addLoading, setAddLoading] = React.useState(false);
+  const [removeLoading, setRemoveLoading] = React.useState(false);
+  const [moveLoading, setMoveLoading] = React.useState(false);
 
   // 仍保留：必要時可用 videoId 搜索（做為後備）
   async function findItemsInPlaylistByVideoIds(
@@ -659,6 +662,7 @@ export default function HomeClient() {
     onMutate: async (variables) => {
       const { targetPlaylistId, videoIds } = variables;
 
+      setAddLoading(true);
       setActionToast({ status: "loading", label: "新增到播放清單" });
 
       await queryClient.cancelQueries({
@@ -699,11 +703,13 @@ export default function HomeClient() {
 
       const key = ["playlist-items", targetPlaylistId] as const;
       const hadCache = Boolean(queryClient.getQueryData(key));
+
       return { targetPlaylistId, videoIds, hadCache };
     },
 
     onError: (_error, _vars, ctx) => {
       setActionToast({ status: "error", label: "新增到播放清單" });
+
       if (ctx?.hadCache) {
         removeTempFromPlaylistCache(
           queryClient,
@@ -713,10 +719,8 @@ export default function HomeClient() {
       }
     },
 
-    // ✅ 這裡改成：保存 created 的「真實 playlistItemId」
+    // ✅ 這裡只負責記錄 lastOp + 清選取，不管 toast
     onSuccess: (res: AddApiResult, variables) => {
-      setActionToast({ status: "success", label: "新增到播放清單" });
-
       const created: Array<{ playlistItemId: string; videoId: string | null }> =
         (res.created ?? [])
           .map((c: CreatedItem) => ({
@@ -736,19 +740,33 @@ export default function HomeClient() {
       });
     },
 
-    onSettled: async (_data, _error, variables) => {
+    onSettled: async (_data, error, variables) => {
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
       await queryClient.invalidateQueries({
         queryKey: ["playlist-items", variables.targetPlaylistId],
       });
-      // ✅ 立刻刷新配額
       await queryClient.invalidateQueries({ queryKey: ["quota"] });
 
       await new Promise((r) => setTimeout(r, 200));
       await queryClient.refetchQueries({
         queryKey: ["playlist-items", variables.targetPlaylistId],
       });
-      setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
+
+      // ✅ 只有在沒有 error 的情況下才顯示成功 toast，
+      //    且與 loading 關閉時間點保持一致
+      if (!error) {
+        setActionToast({ status: "success", label: "新增到播放清單" });
+      }
+
+      setAddLoading(false);
+      setTimeout(
+        () =>
+          setActionToast((s) => ({
+            ...s,
+            status: "idle",
+          })),
+        0
+      );
     },
   });
 
@@ -766,6 +784,7 @@ export default function HomeClient() {
     onMutate: async (variables) => {
       const { sourcePlaylistId, playlistItemIds } = variables;
 
+      setRemoveLoading(true);
       setActionToast({ status: "loading", label: "從清單移除" });
 
       await queryClient.cancelQueries({
@@ -785,7 +804,10 @@ export default function HomeClient() {
 
       removeFromPlaylistCache(queryClient, sourcePlaylistId, playlistItemIds);
 
-      setSelectedMap((prev) => ({ ...prev, [sourcePlaylistId]: new Set() }));
+      setSelectedMap((prev) => ({
+        ...prev,
+        [sourcePlaylistId]: new Set(),
+      }));
 
       return { key, snapshot, sourcePlaylistId, backupRemoved };
     },
@@ -797,9 +819,8 @@ export default function HomeClient() {
       setActionToast({ status: "error", label: "從清單移除" });
     },
 
-    // ✅ 移除的 Undo 仍用 videoIds（只能重新 add 回來）
+    // ✅ 仍在這裡設定 lastOp（復原用），但不發 success toast
     onSuccess: (_res, _vars, ctx) => {
-      setActionToast({ status: "success", label: "從清單移除" });
       const vids = (ctx?.backupRemoved ?? []).map((i) => i.videoId);
       if (vids.length) {
         setLastOp({
@@ -810,19 +831,31 @@ export default function HomeClient() {
       }
     },
 
-    onSettled: async (_data, _error, variables) => {
+    onSettled: async (_data, error, variables) => {
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
       await queryClient.invalidateQueries({
         queryKey: ["playlist-items", variables.sourcePlaylistId],
       });
-      // ✅ 立刻刷新配額
       await queryClient.invalidateQueries({ queryKey: ["quota"] });
 
       await new Promise((r) => setTimeout(r, 200));
       await queryClient.refetchQueries({
         queryKey: ["playlist-items", variables.sourcePlaylistId],
       });
-      setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
+
+      if (!error) {
+        setActionToast({ status: "success", label: "從清單移除" });
+      }
+
+      setRemoveLoading(false);
+      setTimeout(
+        () =>
+          setActionToast((s) => ({
+            ...s,
+            status: "idle",
+          })),
+        0
+      );
     },
   });
 
@@ -839,6 +872,7 @@ export default function HomeClient() {
       }),
 
     onMutate: async ({ sourcePlaylistId, targetPlaylistId, items }) => {
+      setMoveLoading(true);
       setActionToast({ status: "loading", label: "一併移轉" });
 
       await Promise.all([
@@ -881,8 +915,10 @@ export default function HomeClient() {
       );
       addToPlaylistCache(queryClient, targetPlaylistId, optimisticTargetItems);
 
-      // 清來源欄的選取
-      setSelectedMap((prev) => ({ ...prev, [sourcePlaylistId]: new Set() }));
+      setSelectedMap((prev) => ({
+        ...prev,
+        [sourcePlaylistId]: new Set(),
+      }));
 
       return {
         sourcePlaylistId,
@@ -916,10 +952,8 @@ export default function HomeClient() {
       setActionToast({ status: "error", label: "一併移轉" });
     },
 
-    // ✅ 保存 moved.to 的「真實 playlistItemId」，Undo 直接用這些 id 搬回
+    // ✅ 只負責記錄 lastOp，不控制 toast
     onSuccess: (res: MoveApiResult, vars) => {
-      setActionToast({ status: "success", label: "一併移轉" });
-
       const toItems: Array<{ playlistItemId: string; videoId: string }> = (
         res.moved ?? []
       )
@@ -939,7 +973,7 @@ export default function HomeClient() {
       }
     },
 
-    onSettled: async (_d, _e, { sourcePlaylistId, targetPlaylistId }) => {
+    onSettled: async (_d, error, { sourcePlaylistId, targetPlaylistId }) => {
       await queryClient.invalidateQueries({ queryKey: ["playlists"] });
       await Promise.all([
         queryClient.invalidateQueries({
@@ -949,7 +983,6 @@ export default function HomeClient() {
           queryKey: ["playlist-items", targetPlaylistId],
         }),
       ]);
-      // ✅ 立刻刷新配額
       await queryClient.invalidateQueries({ queryKey: ["quota"] });
 
       await new Promise((r) => setTimeout(r, 150));
@@ -961,7 +994,20 @@ export default function HomeClient() {
           queryKey: ["playlist-items", targetPlaylistId],
         }),
       ]);
-      setTimeout(() => setActionToast((s) => ({ ...s, status: "idle" })), 0);
+
+      if (!error) {
+        setActionToast({ status: "success", label: "一併移轉" });
+      }
+
+      setMoveLoading(false);
+      setTimeout(
+        () =>
+          setActionToast((s) => ({
+            ...s,
+            status: "idle",
+          })),
+        0
+      );
     },
   });
 
@@ -1557,9 +1603,9 @@ export default function HomeClient() {
               onMove={(tid?: string | null) => handleMoveSelected(tid)}
               onUndo={onUndo}
               estimatedQuota={estimatedQuota}
-              addLoading={addMutation.isPending}
-              removeLoading={removeMutation.isPending}
-              moveLoading={moveMutation.isPending}
+              addLoading={addLoading}
+              removeLoading={removeLoading}
+              moveLoading={moveLoading}
               undoLoading={undoLoading}
               canUndo={Boolean(lastOp)}
               todayRemaining={todayRemaining}
