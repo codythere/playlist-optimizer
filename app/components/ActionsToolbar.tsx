@@ -67,6 +67,11 @@ export interface ActionsToolbarProps {
   todayRemaining?: number;
   todayBudget?: number;
   quotaResetAtISO?: string;
+
+  /** ✅ 全站影片操作總數（可選） */
+  videoOpsTotal?: number;
+  /** ✅ 全站影片操作數最後更新時間（ISO 字串，可選） */
+  videoOpsUpdatedAtISO?: string;
 }
 
 function formatUnits(n: number) {
@@ -124,6 +129,13 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
   const budget = props.todayBudget ?? 0;
   const percent = budget > 0 ? Math.round((remain / budget) * 100) : 0;
 
+  const showVideoOps = typeof props.videoOpsTotal === "number";
+  const videoOpsTitle = props.videoOpsUpdatedAtISO
+    ? `全站影片操作總數：${formatUnits(
+        props.videoOpsTotal ?? 0,
+      )}（更新於 ${new Date(props.videoOpsUpdatedAtISO).toLocaleString()}）`
+    : `全站影片操作總數：${formatUnits(props.videoOpsTotal ?? 0)}`;
+
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-3">
       <div className="flex items-center gap-2 text-sm">
@@ -136,27 +148,51 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
         ) : null}
       </div>
 
-      {/* 今日配額顯示 */}
-      {showQuota && (
-        <div
-          className="ml-auto flex items-center gap-2 rounded-md border px-2 py-1 text-xs"
-          title={
-            props.quotaResetAtISO
-              ? `今日剩餘：${formatUnits(remain)} / ${formatUnits(
-                  budget
-                )}，重置時間：${props.quotaResetAtISO}`
-              : `今日剩餘：${formatUnits(remain)} / ${formatUnits(budget)}`
-          }
-        >
-          <Gauge className="h-3.5 w-3.5 opacity-70" />
-          <span className="whitespace-nowrap">
-            今日剩餘：<b>{formatUnits(remain)}</b> / {formatUnits(budget)}（
-            {percent}%）
-          </span>
+      {/* ✅ 右側資訊區：今日剩餘（上）+ 全站已操作（下） */}
+      {(showQuota || showVideoOps) && (
+        <div className="ml-auto flex flex-col items-end gap-2">
+          {/* 今日配額顯示（上） */}
+          {showQuota && (
+            <div
+              className="flex items-center gap-2 rounded-md border px-2 py-1 text-xs"
+              title={
+                props.quotaResetAtISO
+                  ? `今日剩餘：${formatUnits(remain)} / ${formatUnits(
+                      budget,
+                    )}，重置時間：${props.quotaResetAtISO}`
+                  : `今日剩餘：${formatUnits(remain)} / ${formatUnits(budget)}`
+              }
+            >
+              <Gauge className="h-3.5 w-3.5 opacity-70" />
+              <span className="whitespace-nowrap">
+                今日剩餘：<b>{formatUnits(remain)}</b> / {formatUnits(budget)}（
+                {percent}%）
+              </span>
+            </div>
+          )}
+
+          {/* 全站影片操作總數（下） */}
+          {showVideoOps && (
+            <div
+              className="flex items-center gap-2 rounded-md border px-2 py-1 text-xs"
+              title={videoOpsTitle}
+            >
+              <ListVideo className="h-3.5 w-3.5 opacity-70" />
+              <span className="whitespace-nowrap">
+                累計影片操作次數：<b>{formatUnits(props.videoOpsTotal ?? 0)}</b>
+              </span>
+            </div>
+          )}
         </div>
       )}
 
-      <div className={cn("flex items-center gap-2", !showQuota && "ml-auto")}>
+      {/* ✅ 右側按鈕區：若右側資訊區沒顯示，才 ml-auto */}
+      <div
+        className={cn(
+          "flex items-center gap-2",
+          !(showQuota || showVideoOps) && "ml-auto",
+        )}
+      >
         {/* 美化後的可搜尋 DDL（Combobox） */}
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger asChild>
@@ -169,7 +205,7 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
               disabled={targetDisabled || playlists.length === 0}
               className={cn(
                 "w-[260px] justify-between",
-                !currentTargetId && "text-muted-foreground"
+                !currentTargetId && "text-muted-foreground",
               )}
               title={currentTitle}
             >
@@ -199,7 +235,9 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
                       <Check
                         className={cn(
                           "mr-2 h-4 w-4",
-                          currentTargetId === p.id ? "opacity-100" : "opacity-0"
+                          currentTargetId === p.id
+                            ? "opacity-100"
+                            : "opacity-0",
                         )}
                       />
                       <span className="truncate">{p.title}</span>
@@ -277,7 +315,7 @@ export function ActionsToolbar(props: ActionsToolbarProps) {
         <Button
           size="sm"
           variant="ghost"
-          onClick={props.onUndo}
+          onClick={onUndo}
           disabled={undoBusy || !props.canUndo}
           aria-disabled={undoBusy || !props.canUndo}
           title={props.canUndo ? "復原上一個動作" : "暫無可復原的動作"}

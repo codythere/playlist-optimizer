@@ -83,4 +83,17 @@ CREATE TABLE IF NOT EXISTS quota_meta (
   value TEXT
 );
 
+-- ✅ 全站影片操作總數（單列）
+CREATE TABLE IF NOT EXISTS global_video_ops (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  total BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 初始化單列
+INSERT INTO global_video_ops (id, total)
+VALUES (1, 0)
+ON CONFLICT (id) DO NOTHING;
+
+
 CREATE INDEX IF NOT EXISTS idx_quota_scope_date ON quota_usage(scope, date_key);

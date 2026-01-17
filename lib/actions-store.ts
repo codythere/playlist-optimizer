@@ -1,6 +1,7 @@
 // lib/actions-store.ts (Postgres 版)
 import { nanoid } from "nanoid";
 import { query, withTransaction } from "@/lib/db";
+import { addGlobalVideoOps } from "@/lib/video-ops";
 import type {
   ActionCounts,
   ActionItemRecord,
@@ -104,7 +105,7 @@ export async function createAction(params: {
       params.targetPlaylistId ?? null,
       status,
       params.parentActionId ?? null,
-    ]
+    ],
   );
   if (!rows[0]) throw new Error("Failed to insert action");
   return mapAction(rows[0]);
@@ -114,7 +115,7 @@ export async function createAction(params: {
 export async function setActionStatus(
   id: string,
   status: ActionStatus,
-  finishedAt?: string | null
+  finishedAt?: string | null,
 ) {
   const { rows } = await query<ActionRow>(
     `UPDATE actions
@@ -122,7 +123,7 @@ export async function setActionStatus(
            finished_at = COALESCE($2::timestamptz, finished_at)
      WHERE id = $3
      RETURNING *`,
-    [status, finishedAt ?? null, id]
+    [status, finishedAt ?? null, id],
   );
   if (!rows[0]) throw new Error("Failed to update action");
   return mapAction(rows[0]);
@@ -143,7 +144,7 @@ export async function createActionItems(
     status?: ActionItemStatus;
     errorCode?: string | null;
     errorMessage?: string | null;
-  }>
+  }>,
 ) {
   const created: ActionItemRecord[] = [];
   await withTransaction(async (client) => {
@@ -170,7 +171,7 @@ export async function createActionItems(
           item.status ?? "pending",
           item.errorCode ?? null,
           item.errorMessage ?? null,
-        ]
+        ],
       );
       if (rows[0]) created.push(mapActionItem(rows[0]));
     }
@@ -186,14 +187,15 @@ export async function updateActionItem(
     errorCode?: string | null;
     errorMessage?: string | null;
     targetPlaylistItemId?: string | null;
-  }
+  },
 ) {
   // 取原資料
   const prev = await query<ActionItemRow>(
     `SELECT * FROM action_items WHERE id = $1`,
-    [id]
+    [id],
   );
   const existing = prev.rows[0];
+  const prevStatus = existing.status;
   if (!existing) return null;
 
   const mergedStatus = updates.status ?? existing.status;
@@ -201,6 +203,12 @@ export async function updateActionItem(
   const mergedMsg = updates.errorMessage ?? existing.error_message ?? null;
   const mergedTarget =
     updates.targetPlaylistItemId ?? existing.target_playlist_item_id ?? null;
+
+  // ✅ 只有第一次從非 success → success 才累加，避免重試重複加總
+  if (prevStatus !== "success" && mergedStatus === "success") {
+    // 你要算全站總數 + undo 也算，所以不篩 type，直接 +1
+    await addGlobalVideoOps(1);
+  }
 
   const { rows } = await query<ActionItemRow>(
     `UPDATE action_items
@@ -210,7 +218,7 @@ export async function updateActionItem(
            target_playlist_item_id = $4
      WHERE id = $5
      RETURNING *`,
-    [mergedStatus, mergedCode, mergedMsg, mergedTarget, id]
+    [mergedStatus, mergedCode, mergedMsg, mergedTarget, id],
   );
   return rows[0] ? mapActionItem(rows[0]) : null;
 }
@@ -220,7 +228,7 @@ export async function listActionItems(actionId: string) {
     `SELECT * FROM action_items
       WHERE action_id = $1
       ORDER BY created_at ASC, id ASC`,
-    [actionId]
+    [actionId],
   );
   return rows.map(mapActionItem);
 }
@@ -228,7 +236,7 @@ export async function listActionItems(actionId: string) {
 export async function getActionById(id: string) {
   const { rows } = await query<ActionRow>(
     `SELECT * FROM actions WHERE id = $1`,
-    [id]
+    [id],
   );
   return rows[0] ? mapAction(rows[0]) : null;
 }
@@ -237,13 +245,13 @@ export async function getActionById(id: string) {
 export async function listActions(
   userId: string,
   limit: number,
-  cursor?: string | null
+  cursor?: string | null,
 ) {
   let cursorTs: string | null = null;
   if (cursor) {
     const cur = await query<{ created_at: string }>(
       `SELECT created_at FROM actions WHERE id = $1`,
-      [cursor]
+      [cursor],
     );
     cursorTs = cur.rows[0]?.created_at ?? null;
   }
@@ -254,7 +262,7 @@ export async function listActions(
          AND ($2::timestamptz IS NULL OR created_at < $2)
        ORDER BY created_at DESC
        LIMIT $3`,
-    [userId, cursorTs, Math.max(1, limit)]
+    [userId, cursorTs, Math.max(1, limit)],
   );
   return rows.map(mapAction);
 }
@@ -272,7 +280,7 @@ export async function getActionCounts(actionId: string): Promise<ActionCounts> {
        SUM(CASE WHEN status='failed'  THEN 1 ELSE 0 END)::bigint as failed
      FROM action_items
      WHERE action_id = $1`,
-    [actionId]
+    [actionId],
   );
   const r = rows[0] ?? { total: "0", success: "0", failed: "0" };
   return {
@@ -286,7 +294,7 @@ export async function getActionCounts(actionId: string): Promise<ActionCounts> {
 export async function listActionsPageSafe(
   userId: string,
   limit: number,
-  cursor?: string | null
+  cursor?: string | null,
 ) {
   return listActions(userId, limit, cursor);
 }
@@ -295,7 +303,7 @@ export async function listActionsPageSafe(
 export async function listActionItemsPageSafe(
   actionId: string,
   limit: number,
-  cursor?: string | null
+  cursor?: string | null,
 ): Promise<{ items: ActionItemRecord[]; nextCursor: string | null }> {
   let cursorCreatedAt: string | null = null;
   let cursorId: string | null = null;
@@ -303,7 +311,7 @@ export async function listActionItemsPageSafe(
   if (cursor) {
     const cur = await query<{ created_at: string; id: string }>(
       `SELECT created_at, id FROM action_items WHERE id = $1`,
-      [cursor]
+      [cursor],
     );
     if (cur.rows[0]) {
       cursorCreatedAt = cur.rows[0].created_at;
@@ -320,7 +328,7 @@ export async function listActionItemsPageSafe(
          )
        ORDER BY created_at ASC, id ASC
        LIMIT $4`,
-    [actionId, cursorCreatedAt, cursorId, Math.max(1, limit + 1)]
+    [actionId, cursorCreatedAt, cursorId, Math.max(1, limit + 1)],
   );
 
   const hasMore = rows.length > limit;

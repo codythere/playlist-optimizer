@@ -20,6 +20,7 @@ import { ActionsToolbar } from "@/app/components/ActionsToolbar";
 import { ProgressToast } from "@/app/components/ProgressToast";
 import { useConfirm } from "@/app/components/confirm/ConfirmProvider";
 import { useQuota } from "@/app/hooks/useQuota";
+import { useVideoOps } from "./hooks/useVideoOps";
 
 /* =========================
  * 型別與共用工具
@@ -98,7 +99,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 function extractApiError(
-  payload: unknown
+  payload: unknown,
 ): { code?: string; message?: string } | null {
   if (!isRecord(payload)) return null;
   if (payload.ok === false && isRecord(payload.error)) {
@@ -142,7 +143,7 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const apiErr = extractApiError(payload);
   if (!res.ok || apiErr) {
     const err = new Error(
-      apiErr?.message ?? res.statusText ?? "Request failed"
+      apiErr?.message ?? res.statusText ?? "Request failed",
     ) as Error & { code?: string; status?: number };
     err.code = apiErr?.code;
     err.status = res.status;
@@ -162,7 +163,7 @@ async function fetchAuth(): Promise<AuthState> {
 function addToPlaylistCache(
   queryClient: import("@tanstack/react-query").QueryClient,
   playlistId: string,
-  addItems: PlaylistItemSummary[]
+  addItems: PlaylistItemSummary[],
 ) {
   const key = ["playlist-items", playlistId] as const;
   const prev = queryClient.getQueryData<{
@@ -216,7 +217,7 @@ function addToPlaylistCache(
 function removeTempFromPlaylistCache(
   queryClient: import("@tanstack/react-query").QueryClient,
   playlistId: string,
-  videoIds: string[]
+  videoIds: string[],
 ) {
   const key = ["playlist-items", playlistId] as const;
   const prev = queryClient.getQueryData<{
@@ -236,7 +237,7 @@ function removeTempFromPlaylistCache(
 function removeFromPlaylistCache(
   queryClient: import("@tanstack/react-query").QueryClient,
   playlistId: string,
-  removeIds: string[]
+  removeIds: string[],
 ) {
   const key = ["playlist-items", playlistId] as const;
   const prev = queryClient.getQueryData<{
@@ -289,7 +290,7 @@ const ItemRow = React.memo(
       <label
         className={cn(
           "flex cursor-pointer gap-3 rounded-md border bg-background p-2 transition",
-          checked && "border-primary ring-2 ring-primary/30"
+          checked && "border-primary ring-2 ring-primary/30",
         )}
       >
         <Checkbox
@@ -322,7 +323,7 @@ const ItemRow = React.memo(
       prev.checked === next.checked &&
       prev.item.playlistItemId === next.item.playlistItemId
     );
-  }
+  },
 );
 
 /** 欄（PlaylistColumn）：虛擬滾動（用實測高度） */
@@ -450,11 +451,11 @@ export default function HomeClient() {
 
   /* ---- 取得播放清單 ---- */
   const playlistsQ = usePlaylists(
-    Boolean(auth && (auth.authenticated || auth.usingMock))
+    Boolean(auth && (auth.authenticated || auth.usingMock)),
   );
   const allPlaylists = React.useMemo(
     () => playlistsQ.data?.playlists ?? [],
-    [playlistsQ.data?.playlists]
+    [playlistsQ.data?.playlists],
   );
 
   /* ---- 視圖狀態 ---- */
@@ -465,6 +466,10 @@ export default function HomeClient() {
     status: "idle" | "loading" | "success" | "error";
     label: string;
   }>({ status: "idle", label: "" });
+
+  // 全站操作次數顯示
+  const videoOpsQ = useVideoOps();
+  const operatedTotal = videoOpsQ.data?.total;
 
   /* ---- ✅ Undo：狀態與工具（改成精準 playlistItemId） ---- */
   type LastOp =
@@ -493,7 +498,7 @@ export default function HomeClient() {
   // 仍保留：必要時可用 videoId 搜索（做為後備）
   async function findItemsInPlaylistByVideoIds(
     playlistId: string,
-    videoIds: string[]
+    videoIds: string[],
   ): Promise<Array<{ playlistItemId: string; videoId: string }>> {
     const need: Set<string> = new Set<string>(videoIds);
 
@@ -510,7 +515,7 @@ export default function HomeClient() {
     const missingInCache =
       items.length === 0 ||
       [...need].some(
-        (v: string) => !items.some((i: PlaylistItemSummary) => i.videoId === v)
+        (v: string) => !items.some((i: PlaylistItemSummary) => i.videoId === v),
       );
 
     if (missingInCache) {
@@ -533,13 +538,13 @@ export default function HomeClient() {
             channelTitle: it.channelTitle,
             thumbnailUrl: extractThumbnailUrl(it.thumbnails),
             position: it.position ?? null,
-          })
+          }),
         );
 
         found.push(...pageItems);
 
         const allFound = [...need].every((v: string) =>
-          found.some((i: PlaylistItemSummary) => i.videoId === v)
+          found.some((i: PlaylistItemSummary) => i.videoId === v),
         );
         if (allFound) {
           items = found;
@@ -594,7 +599,7 @@ export default function HomeClient() {
 
   const confirmedPlaylists = React.useMemo(
     () => allPlaylists.filter((p) => checkedPlaylistIds.has(p.id)),
-    [allPlaylists, checkedPlaylistIds]
+    [allPlaylists, checkedPlaylistIds],
   );
 
   /* ---- 依「被選清單」載入每欄影片 ---- */
@@ -603,7 +608,7 @@ export default function HomeClient() {
       queryKey: ["playlist-items", p.id],
       queryFn: async () => {
         const data = await apiRequest<PlaylistItemsPayload>(
-          `/api/playlist-items?playlistId=${encodeURIComponent(p.id)}`
+          `/api/playlist-items?playlistId=${encodeURIComponent(p.id)}`,
         );
         const items: PlaylistItemSummary[] = (data.items ?? []).map((it) => ({
           playlistItemId: it.id,
@@ -634,13 +639,13 @@ export default function HomeClient() {
   const totalSelectedCount = React.useMemo(
     () =>
       Object.values(selectedMap).reduce((sum, s) => sum + (s?.size ?? 0), 0),
-    [selectedMap]
+    [selectedMap],
   );
   const estimatedQuota = totalSelectedCount * 50;
 
   /* ---- 目標清單（由工具列 DDL 選擇） ---- */
   const [targetPlaylistId, setTargetPlaylistId] = React.useState<string | null>(
-    null
+    null,
   );
 
   /* ---- Mutations ---- */
@@ -714,7 +719,7 @@ export default function HomeClient() {
         removeTempFromPlaylistCache(
           queryClient,
           ctx.targetPlaylistId,
-          ctx.videoIds
+          ctx.videoIds,
         );
       }
     },
@@ -756,6 +761,9 @@ export default function HomeClient() {
       //    且與 loading 關閉時間點保持一致
       if (!error) {
         setActionToast({ status: "success", label: "新增到播放清單" });
+
+        // ✅ 加在這裡：新增成功後刷新全站操作次數
+        await queryClient.invalidateQueries({ queryKey: ["videoOps"] });
       }
 
       setAddLoading(false);
@@ -765,7 +773,7 @@ export default function HomeClient() {
             ...s,
             status: "idle",
           })),
-        0
+        0,
       );
     },
   });
@@ -799,7 +807,7 @@ export default function HomeClient() {
 
       const backupRemoved =
         snapshot?.items.filter((i) =>
-          playlistItemIds.includes(i.playlistItemId)
+          playlistItemIds.includes(i.playlistItemId),
         ) ?? [];
 
       removeFromPlaylistCache(queryClient, sourcePlaylistId, playlistItemIds);
@@ -845,6 +853,9 @@ export default function HomeClient() {
 
       if (!error) {
         setActionToast({ status: "success", label: "從清單移除" });
+
+        // ✅ 移除成功後刷新全站操作次數
+        await queryClient.invalidateQueries({ queryKey: ["videoOps"] });
       }
 
       setRemoveLoading(false);
@@ -854,7 +865,7 @@ export default function HomeClient() {
             ...s,
             status: "idle",
           })),
-        0
+        0,
       );
     },
   });
@@ -892,14 +903,14 @@ export default function HomeClient() {
 
       const movingItems =
         srcPrev?.items.filter((i) =>
-          items.some((x) => x.playlistItemId === i.playlistItemId)
+          items.some((x) => x.playlistItemId === i.playlistItemId),
         ) ?? [];
 
       // 樂觀：來源先移除
       removeFromPlaylistCache(
         queryClient,
         sourcePlaylistId,
-        items.map((it) => it.playlistItemId)
+        items.map((it) => it.playlistItemId),
       );
 
       // 樂觀：目標先加入「暫時項目」
@@ -911,7 +922,7 @@ export default function HomeClient() {
           channelTitle: i.channelTitle,
           thumbnailUrl: i.thumbnailUrl ?? null,
           position: null,
-        })
+        }),
       );
       addToPlaylistCache(queryClient, targetPlaylistId, optimisticTargetItems);
 
@@ -946,7 +957,7 @@ export default function HomeClient() {
         removeTempFromPlaylistCache(
           queryClient,
           ctx.targetPlaylistId,
-          ctx.optimisticTargetVideoIds
+          ctx.optimisticTargetVideoIds,
         );
       }
       setActionToast({ status: "error", label: "一併移轉" });
@@ -997,6 +1008,9 @@ export default function HomeClient() {
 
       if (!error) {
         setActionToast({ status: "success", label: "一併移轉" });
+
+        // ✅ 移轉成功後刷新全站操作次數
+        await queryClient.invalidateQueries({ queryKey: ["videoOps"] });
       }
 
       setMoveLoading(false);
@@ -1006,7 +1020,7 @@ export default function HomeClient() {
             ...s,
             status: "idle",
           })),
-        0
+        0,
       );
     },
   });
@@ -1146,7 +1160,7 @@ export default function HomeClient() {
 
   const handleRemoveSelected = async () => {
     const toRemove = Object.entries(selectedMap).flatMap(([_, set]) =>
-      Array.from(set)
+      Array.from(set),
     );
     const total = toRemove.length;
     if (total === 0) return;
@@ -1282,12 +1296,12 @@ export default function HomeClient() {
             channelTitle: "",
             thumbnailUrl: null,
             position: null,
-          })
+          }),
         );
         addToPlaylistCache(
           queryClient,
           lastOp.sourcePlaylistId,
-          optimisticBackItems
+          optimisticBackItems,
         );
 
         try {
@@ -1303,7 +1317,7 @@ export default function HomeClient() {
           removeTempFromPlaylistCache(
             queryClient,
             lastOp.sourcePlaylistId,
-            lastOp.videoIds
+            lastOp.videoIds,
           );
           throw e;
         }
@@ -1325,7 +1339,7 @@ export default function HomeClient() {
         removeTempFromPlaylistCache(
           queryClient,
           lastOp.sourcePlaylistId,
-          lastOp.videoIds
+          lastOp.videoIds,
         );
 
         await queryClient.invalidateQueries({ queryKey: ["playlists"] });
@@ -1384,6 +1398,9 @@ export default function HomeClient() {
         await queryClient.invalidateQueries({ queryKey: ["quota"] });
       }
 
+      // ✅ Undo 成功也算一次操作，所以要刷新
+      await queryClient.invalidateQueries({ queryKey: ["videoOps"] });
+
       setActionToast({ status: "success", label: "復原" });
       setLastOp?.(null);
     } catch (_err) {
@@ -1419,6 +1436,8 @@ export default function HomeClient() {
 
       // ✅ 清掉 quota 相關快取
       queryClient.removeQueries({ queryKey: ["quota"] });
+      // ✅ 清掉 videoOps 相關快取
+      queryClient.removeQueries({ queryKey: ["videoOps"] });
 
       queryClient.invalidateQueries({ queryKey: ["auth"] });
       queryClient.invalidateQueries({ queryKey: ["playlists"] });
@@ -1458,10 +1477,10 @@ export default function HomeClient() {
       columnsData
         .map(
           (q, i) =>
-            `${confirmedPlaylists[i]?.id ?? "x"}:${q.data?.items?.length ?? 0}`
+            `${confirmedPlaylists[i]?.id ?? "x"}:${q.data?.items?.length ?? 0}`,
         )
         .join("|"),
-    [columnsData, confirmedPlaylists]
+    [columnsData, confirmedPlaylists],
   );
 
   React.useLayoutEffect(() => {
@@ -1611,6 +1630,7 @@ export default function HomeClient() {
               todayRemaining={todayRemaining}
               todayBudget={todayBudget}
               quotaResetAtISO={quotaResetAtISO}
+              videoOpsTotal={operatedTotal}
             />
           </section>
 
