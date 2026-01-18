@@ -3,7 +3,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { Menu, History, ListMusic } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Image from "next/image";
@@ -43,6 +43,7 @@ export function AppShell({
   footer?: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname(); // ✅ 用來判斷目前頁面
   const queryClient = useQueryClient();
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const [desktopOpen, setDesktopOpen] = React.useState(true);
@@ -67,7 +68,7 @@ export function AppShell({
     return () => {
       window.removeEventListener(
         "ytpm:auth-changed",
-        onChanged as EventListener
+        onChanged as EventListener,
       );
     };
   }, [queryClient]);
@@ -75,24 +76,34 @@ export function AppShell({
   const me = authQ.data;
   const loadingMe = authQ.isLoading;
 
+  // ✅ 判斷 active（支援子路由：例如 /action-log/xxx）
+  const isActive = React.useCallback(
+    (href: string) => {
+      if (!pathname) return false;
+      if (href === "/") return pathname === "/";
+      return pathname === href || pathname.startsWith(href + "/");
+    },
+    [pathname],
+  );
+
+  const navLinkClass = (active: boolean) =>
+    cn(
+      "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+      active
+        ? "bg-accent text-foreground"
+        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+    );
+
   const NavItems = (
     <nav className="space-y-1 p-4">
-      <Link
-        href="/"
-        className={cn(
-          "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-accent",
-          "text-foreground"
-        )}
-      >
+      <Link href="/" className={navLinkClass(isActive("/"))}>
         <ListMusic className="h-4 w-4" />
         Playlist Management
       </Link>
+
       <Link
         href="/action-log"
-        className={cn(
-          "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium hover:bg-accent",
-          "text-muted-foreground"
-        )}
+        className={navLinkClass(isActive("/action-log"))}
       >
         <History className="h-4 w-4" />
         Action Log
@@ -106,7 +117,7 @@ export function AppShell({
       <aside
         className={cn(
           "hidden md:flex md:flex-col fixed left-0 top-0 h-screen border-r bg-background overflow-hidden transition-[width] duration-200",
-          desktopOpen ? "w-56" : "w-0"
+          desktopOpen ? "w-56" : "w-0",
         )}
         aria-hidden={!desktopOpen}
       >
@@ -129,7 +140,7 @@ export function AppShell({
       <div
         className={cn(
           "flex-1 transition-all duration-200",
-          desktopOpen ? "md:ml-56" : "md:ml-0"
+          desktopOpen ? "md:ml-56" : "md:ml-0",
         )}
       >
         <div className="flex min-h-screen flex-col">
@@ -179,8 +190,8 @@ export function AppShell({
                     onClick={() =>
                       router.push(
                         `/login?redirect=${encodeURIComponent(
-                          window.location.pathname
-                        )}`
+                          window.location.pathname,
+                        )}`,
                       )
                     }
                   >
