@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Playlist Manager",
+  title: "Playlist Optimizer",
   description: "Batch manage YouTube playlists with ease",
   icons: {
     icon: "/favicon.png",

@@ -98,7 +98,7 @@ export function AppShell({
     <nav className="space-y-1 p-4">
       <Link href="/" className={navLinkClass(isActive("/"))}>
         <ListMusic className="h-4 w-4" />
-        Playlist Management
+        Playlist Optimizer
       </Link>
 
       <Link
@@ -168,7 +168,7 @@ export function AppShell({
               {/* 左側：Logo 與標題 */}
               <div className="flex items-center gap-1.5 text-base font-semibold">
                 <Image src="/logo.png" alt="App Logo" width={20} height={20} />
-                Playlist Manager
+                Playlist Optimizer
               </div>
 
               {/* 右側：使用者區塊（用 React Query 的 auth 狀態） */}

@@ -1,4 +1,4 @@
-# 🗄️ YouTube Playlist Manager — Database Setup Guide
+# 🗄️ YouTube Playlist Optimizer — Database Setup Guide
 
 This document explains how to initialize and use the PostgreSQL database for this project, including Neon cloud setup, environment variables, schema creation, and verification steps.
 

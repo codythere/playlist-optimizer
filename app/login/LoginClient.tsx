@@ -37,12 +37,12 @@ export default function LoginClient({
         {/* Logo + Title */}
         <div className="mb-6 flex items-center gap-2">
           <Image src="/logo.png" alt="App Logo" width={24} height={24} />
-          <div className="text-base font-semibold">Playlist Manager</div>
+          <div className="text-base font-semibold">Playlist Optimizer</div>
         </div>
 
         <h1 className="mb-1 text-xl font-semibold">Sign in</h1>
         <p className="mb-4 text-sm text-muted-foreground">
-          Use your Google account to manage your playlists.
+          Use your Google account to optimize your playlists.
         </p>
 
         {/* 錯誤訊息（可選） */}
